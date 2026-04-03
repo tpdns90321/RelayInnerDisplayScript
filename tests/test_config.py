@@ -1,0 +1,67 @@
+from __future__ import annotations
+
+from pathlib import Path
+from tempfile import TemporaryDirectory
+import textwrap
+import unittest
+
+from relayinner_display.config import ConfigError, load_config
+
+
+VALID_CONFIG = textwrap.dedent(
+    """
+    [target]
+    vmid = 101
+    node_name = "auto"
+    guest_os = "windows"
+    console_backend = "spice"
+
+    [runtime]
+    run_dir = "/run/relayinner-display"
+    control_socket = "/run/relayinner-display/session.sock"
+    spice_vv_path = "/run/relayinner-display/current.vv"
+    log_namespace = "relayinner-display"
+
+    [policy]
+    poll_interval_ms = 2000
+    reconnect_initial_ms = 1000
+    reconnect_max_ms = 15000
+    command_timeout_s = 10
+    """
+)
+
+
+class ConfigTests(unittest.TestCase):
+    def test_load_config_accepts_spec_defaults(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "config.toml"
+            config_path.write_text(VALID_CONFIG, encoding="utf-8")
+
+            config = load_config(config_path)
+
+        self.assertEqual(config.target.vmid, 101)
+        self.assertEqual(config.target.node_name, "auto")
+        self.assertEqual(config.runtime.control_socket.name, "session.sock")
+        self.assertEqual(config.policy.reconnect_max_ms, 15000)
+
+    def test_missing_required_key_raises(self) -> None:
+        content = VALID_CONFIG.replace('console_backend = "spice"\n', "")
+        with TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "config.toml"
+            config_path.write_text(content, encoding="utf-8")
+
+            with self.assertRaises(ConfigError):
+                load_config(config_path)
+
+    def test_unsupported_console_backend_raises(self) -> None:
+        content = VALID_CONFIG.replace('console_backend = "spice"', 'console_backend = "vnc"')
+        with TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "config.toml"
+            config_path.write_text(content, encoding="utf-8")
+
+            with self.assertRaises(ConfigError):
+                load_config(config_path)
+
+
+if __name__ == "__main__":
+    unittest.main()

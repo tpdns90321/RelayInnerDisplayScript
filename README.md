@@ -6,11 +6,12 @@ The target outcome is a small appliance-like runtime that takes one VM managed b
 
 ## Status
 
-This repository is currently spec-first.
+This repository now includes the first runtime slice for the MVP.
 
 - The MVP architecture and behavior are defined in `./specs`.
-- The runtime implementation is not in place yet.
-- The current design assumes direct installation on a Proxmox host, not an LXC container.
+- Spec 10 now has a Python implementation for config loading, daemon/session IPC, local Proxmox command wrappers, SPICE `.vv` generation, and reconnect state handling.
+- The current design still assumes direct installation on a Proxmox host, not an LXC container.
+- Later specs for the Cage kiosk shell, DPMS policy, host power-button handling, and deployment/bootstrap are still pending.
 
 ## MVP Goals
 
@@ -39,6 +40,14 @@ The current MVP design assumes:
 - `relayinner-display-session` as the Cage session supervisor
 - local IPC over a Unix socket in `/run/relayinner-display/`
 - persistent config in `/etc/relayinner-display/config.toml`
+
+Current implementation coverage:
+
+- `relayinner_display.config` validates the shared TOML config model from Spec 10.
+- `relayinner_display.proxmox` wraps local `qm` and `pvesh` calls and writes `remote-viewer` `.vv` files.
+- `relayinner_display.daemon` owns the VM/session state machine and the Unix-socket control path.
+- `relayinner_display.session` supervises `remote-viewer` and reports console lifecycle events back to the daemon.
+- `tests/` covers config parsing, IPC validation, Proxmox command handling, reconnect logic, and session supervision.
 
 Operationally, the appliance is expected to move through a small state machine:
 
@@ -93,11 +102,15 @@ The final implementation is expected to manage:
 .
 ├── README.md
 ├── AGENTS.md
+├── relayinner_display/
 ├── specs/
+├── tests/
 └── tasks/
 ```
 
+- `relayinner_display/` holds the current Python runtime for Spec 10.
 - `specs/` holds the MVP specification set.
+- `tests/` holds unit tests for the current runtime slice.
 - `tasks/` is reserved for task/worktree-oriented workflow.
 
 ## Intended Operator Experience
