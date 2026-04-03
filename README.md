@@ -1,0 +1,119 @@
+# RelayInnerDisplayScript
+
+RelayInnerDisplayScript is a Proxmox-hosted display relay project for a single KVM guest.
+
+The target outcome is a small appliance-like runtime that takes one VM managed by Proxmox and mirrors it directly onto a monitor attached to the Proxmox host. The host should boot into a kiosk session, show the guest through SPICE and `remote-viewer`, sleep or wake the monitor based on VM power state, and use the host power button as guest power control instead of shutting down the host.
+
+## Status
+
+This repository is currently spec-first.
+
+- The MVP architecture and behavior are defined in `./specs`.
+- The runtime implementation is not in place yet.
+- The current design assumes direct installation on a Proxmox host, not an LXC container.
+
+## MVP Goals
+
+- Relay one Proxmox VM to one host-attached display.
+- Use `Cage` as the kiosk shell and `remote-viewer` as the SPICE client.
+- Control the target VM locally with `qm` and `pvesh`.
+- Put the monitor into standby when the VM is off and wake it when the VM is active.
+- Map the host power button to guest start or graceful shutdown behavior.
+
+## Non-goals for MVP
+
+- Multiple VM switching
+- Audio, clipboard, USB policy, and file sharing
+- noVNC or browser viewing
+- Cluster migration tracking
+- Host suspend or general-purpose desktop access
+- Packaging inside Proxmox LXC
+
+## Planned Runtime Shape
+
+The current MVP design assumes:
+
+- Proxmox host direct install
+- Python scripts plus systemd services
+- `relayinner-displayd` as the root-owned control daemon
+- `relayinner-display-session` as the Cage session supervisor
+- local IPC over a Unix socket in `/run/relayinner-display/`
+- persistent config in `/etc/relayinner-display/config.toml`
+
+Operationally, the appliance is expected to move through a small state machine:
+
+- `booting`
+- `waiting_for_session`
+- `waiting_for_vm`
+- `requesting_console`
+- `showing_console`
+- `reconnecting_console`
+- `display_sleeping`
+- `degraded`
+
+## Spec Set
+
+- [Spec index](./specs/README.md)
+- [Spec 10: Proxmox Local Console Relay Core](./specs/10-proxmox-local-console-relay-core.md)
+- [Spec 11: Cage Kiosk Session Shell](./specs/11-cage-kiosk-session-shell.md)
+- [Spec 12: VM Power-State to Host DPMS Control](./specs/12-vm-power-state-to-host-dpms-control.md)
+- [Spec 13: Host Power Button to Guest Power Control](./specs/13-host-power-button-to-guest-power-control.md)
+- [Spec 14: Proxmox Host Runtime and Bootstrap](./specs/14-proxmox-host-runtime-and-bootstrap.md)
+- [Spec 15: MVP Integration, Failure Policy, and Ops](./specs/15-mvp-integration-failure-policy-and-ops.md)
+
+Recommended implementation order:
+
+1. Spec 10
+2. Spec 11
+3. Spec 12 and Spec 13
+4. Spec 14
+5. Spec 15
+
+## Expected Host Dependencies
+
+The MVP spec currently assumes these host-side packages or equivalents:
+
+- `python3`
+- `python3-evdev`
+- `cage`
+- `seatd`
+- `virt-viewer`
+- `wlopm`
+
+The final implementation is expected to manage:
+
+- systemd service units for daemon, kiosk session, and seat handling
+- a non-login runtime user
+- a `logind` override for host power-button behavior
+- runtime state under `/run/relayinner-display/`
+
+## Repository Layout
+
+```text
+.
+├── README.md
+├── AGENTS.md
+├── specs/
+└── tasks/
+```
+
+- `specs/` holds the MVP specification set.
+- `tasks/` is reserved for task/worktree-oriented workflow.
+
+## Intended Operator Experience
+
+After the project is implemented, the intended flow is:
+
+1. Install the runtime on a Proxmox host that has a directly attached monitor.
+2. Configure one target `vmid`.
+3. Reboot or start the services.
+4. The host enters a Cage kiosk session automatically.
+5. If the VM is running, the guest appears fullscreen.
+6. If the VM is off, the display waits briefly and then sleeps.
+7. Pressing the host power button starts the VM when it is off, or requests graceful shutdown when it is on.
+
+## Notes
+
+- The design is intentionally narrow to reach a usable MVP quickly.
+- The current specs assume the target guest is a desktop-style VM, with Windows as the default operator profile.
+- Because the control path is local to the Proxmox host, the MVP does not require storing a remote Proxmox API token.
