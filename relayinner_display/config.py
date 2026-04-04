@@ -11,6 +11,10 @@ SUPPORTED_DPMS_POLICIES = {"vm-power"}
 SUPPORTED_POWER_BUTTON_ACTIONS_WHEN_RUNNING = {"shutdown"}
 SUPPORTED_POWER_BUTTON_ACTIONS_WHEN_STOPPED = {"start"}
 DEFAULT_POWER_BUTTON_EVENT = Path("/dev/input/by-path/platform-i8042-serio-0-event-power")
+DEFAULT_RUNTIME_RUN_DIR = Path("/run/relayinner-display")
+DEFAULT_CONTROL_SOCKET = DEFAULT_RUNTIME_RUN_DIR / "session.sock"
+DEFAULT_SPICE_VV_PATH = DEFAULT_RUNTIME_RUN_DIR / "current.vv"
+DEFAULT_LOG_NAMESPACE = "relayinner-display"
 
 
 class ConfigError(ValueError):
@@ -71,6 +75,37 @@ class AppConfig:
     policy: PolicyConfig
     display: DisplayConfig = field(default_factory=DisplayConfig)
     input: InputConfig = field(default_factory=InputConfig)
+
+
+def build_fallback_config() -> AppConfig:
+    return AppConfig(
+        target=TargetConfig(
+            vmid=0,
+            node_name="unknown",
+            guest_os="unknown",
+            console_backend="spice",
+        ),
+        runtime=RuntimeConfig(
+            run_dir=DEFAULT_RUNTIME_RUN_DIR,
+            control_socket=DEFAULT_CONTROL_SOCKET,
+            spice_vv_path=DEFAULT_SPICE_VV_PATH,
+            log_namespace=DEFAULT_LOG_NAMESPACE,
+        ),
+        policy=PolicyConfig(
+            poll_interval_ms=2000,
+            reconnect_initial_ms=1000,
+            reconnect_max_ms=15000,
+            command_timeout_s=10,
+            dpms_policy="vm-power",
+            dpms_off_delay_ms=5000,
+            power_state_stabilize_ms=3000,
+            power_button_action_when_running="shutdown",
+            power_button_action_when_stopped="start",
+            shutdown_timeout_s=90,
+        ),
+        display=DisplayConfig(),
+        input=InputConfig(forward_power_button=False),
+    )
 
 
 def load_config(path: str | Path) -> AppConfig:

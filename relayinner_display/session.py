@@ -10,7 +10,7 @@ import socket
 import subprocess
 import time
 
-from .config import AppConfig, load_config
+from .config import AppConfig, ConfigError, build_fallback_config, load_config
 from .ipc import decode_message, encode_message, validate_daemon_message
 
 
@@ -47,6 +47,10 @@ def build_session_env(source_env: Mapping[str, str] | None = None) -> dict[str, 
     env = {name: value for name, value in source.items() if name in SESSION_ENV_ALLOWLIST}
     env.setdefault("XDG_SESSION_TYPE", "wayland")
     return env
+
+
+def subsystem_logger(namespace: str, subsystem: str) -> logging.Logger:
+    return logging.getLogger(f"{namespace}.{subsystem}")
 
 
 @dataclass
@@ -134,6 +138,10 @@ class SessionSupervisor:
     ) -> None:
         self.config = config
         self.logger = logger or logging.getLogger(config.runtime.log_namespace)
+        self.namespace = self.logger.name
+        self.session_logger = subsystem_logger(self.namespace, "session")
+        self.console_logger = subsystem_logger(self.namespace, "console")
+        self.display_logger = subsystem_logger(self.namespace, "display")
         self.process_factory = process_factory
         self.power_helper = power_helper or config.display.power_helper
         self.power_command_runner = power_command_runner
@@ -152,14 +160,17 @@ class SessionSupervisor:
             self.view_state.waiting_reason = str(payload["reason"])
             self._stop_console(report_exit=False)
             self._refresh_view_state()
-            self.logger.info("Waiting state set to %s", self.view_state.waiting_reason)
+            self.session_logger.info("Waiting state set to %s", self.view_state.waiting_reason)
             return []
 
         if message_type == "disconnect_console":
             self.view_state.waiting_reason = str(payload["reason"])
             self._stop_console(report_exit=False)
             self._refresh_view_state()
-            self.logger.info("Console disconnected because %s", self.view_state.waiting_reason)
+            self.session_logger.info(
+                "Console disconnected because %s",
+                self.view_state.waiting_reason,
+            )
             return []
 
         if message_type == "connect_spice":
@@ -197,7 +208,7 @@ class SessionSupervisor:
             "code": max(exit_status, 0),
             "signal": abs(exit_status) if exit_status < 0 else 0,
         }
-        self.logger.warning("remote-viewer exited unexpectedly: %s", event)
+        self.console_logger.warning("remote-viewer exited unexpectedly: %s", event)
         return event
 
     def _launch_console(self, vv_path: str) -> list[dict[str, object]]:
@@ -215,13 +226,13 @@ class SessionSupervisor:
             reason = f"viewer_launch_failed: {exc}"
             self.view_state.waiting_reason = "degraded"
             self._refresh_view_state()
-            self.logger.error("remote-viewer launch failed: %s", exc)
+            self.console_logger.error("remote-viewer launch failed: %s", exc)
             return [{"type": "session_error", "reason": reason}]
 
         self.viewer_process = process
         self._suppress_exit_report = False
         self._refresh_view_state()
-        self.logger.info("remote-viewer started with pid=%s", process.pid)
+        self.console_logger.info("remote-viewer started with pid=%s", process.pid)
         return [{"type": "console_started", "pid": process.pid}]
 
     def _stop_console(self, report_exit: bool) -> None:
@@ -239,7 +250,7 @@ class SessionSupervisor:
             try:
                 self.viewer_process.wait(timeout=2)
             except subprocess.TimeoutExpired:
-                self.logger.warning("remote-viewer did not exit after SIGKILL")
+                self.console_logger.warning("remote-viewer did not exit after SIGKILL")
         finally:
             self.viewer_process = None
             self._refresh_view_state()
@@ -257,13 +268,13 @@ class SessionSupervisor:
                 check=False,
             )
         except OSError as exc:
-            self.logger.error("Display power helper failed to start: %s", exc)
+            self.display_logger.error("Display power helper failed to start: %s", exc)
             return []
 
         if completed.returncode != 0:
             helper_output = (completed.stderr or completed.stdout or "").strip()
             suffix = f": {helper_output}" if helper_output else ""
-            self.logger.error(
+            self.display_logger.error(
                 "Display power helper exited with %s for state=%s output=%s%s",
                 completed.returncode,
                 state,
@@ -274,7 +285,7 @@ class SessionSupervisor:
 
         self.view_state.display_power_state = state
         self._refresh_view_state()
-        self.logger.info("Display power applied: state=%s output=%s", state, target_output)
+        self.display_logger.info("Display power applied: state=%s output=%s", state, target_output)
         return [{"type": "display_power_applied", "state": state}]
 
     def _refresh_view_state(self) -> None:
@@ -299,8 +310,16 @@ def configure_logging(namespace: str) -> logging.Logger:
 
 
 def run(config_path: Path) -> int:
-    config = load_config(config_path)
+    startup_error: str | None = None
+    try:
+        config = load_config(config_path)
+    except ConfigError as exc:
+        config = build_fallback_config()
+        startup_error = f"Invalid config: {exc}"
+
     logger = configure_logging(config.runtime.log_namespace)
+    if startup_error is not None:
+        subsystem_logger(logger.name, "session").error("%s", startup_error)
     supervisor = SessionSupervisor(config=config, logger=logger)
     client = SessionSocketClient(config.runtime.control_socket)
     poll_interval_s = config.policy.poll_interval_ms / 1000

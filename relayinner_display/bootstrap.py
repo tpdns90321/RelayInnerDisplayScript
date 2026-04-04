@@ -35,6 +35,8 @@ REQUIRED_SERVICES = (
     "relayinner-displayd.service",
 )
 DEFAULT_PATH_ENV = "/usr/local/lib/relayinner-display:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+SYSTEMD_START_LIMIT_INTERVAL_SEC = 120
+SYSTEMD_START_LIMIT_BURST = 5
 
 
 class BootstrapError(RuntimeError):
@@ -184,6 +186,8 @@ def render_daemon_service(paths: HostInstallPaths = HostInstallPaths()) -> str:
         Description=RelayInnerDisplay Proxmox relay daemon
         After=local-fs.target network-online.target
         Wants=network-online.target
+        StartLimitIntervalSec={SYSTEMD_START_LIMIT_INTERVAL_SEC}
+        StartLimitBurst={SYSTEMD_START_LIMIT_BURST}
 
         [Service]
         Type=simple
@@ -206,6 +210,8 @@ def render_kiosk_service(paths: HostInstallPaths = HostInstallPaths()) -> str:
         After=systemd-user-sessions.service relayinner-display-seatd.service relayinner-displayd.service
         Requires=relayinner-display-seatd.service relayinner-displayd.service
         Conflicts=getty@tty1.service display-manager.service
+        StartLimitIntervalSec={SYSTEMD_START_LIMIT_INTERVAL_SEC}
+        StartLimitBurst={SYSTEMD_START_LIMIT_BURST}
 
         [Service]
         Type=simple
@@ -244,6 +250,8 @@ def render_seatd_service() -> str:
         Description=RelayInnerDisplay seatd service
         After=systemd-udevd.service systemd-logind.service
         Before=relayinner-display-kiosk.service
+        StartLimitIntervalSec={SYSTEMD_START_LIMIT_INTERVAL_SEC}
+        StartLimitBurst={SYSTEMD_START_LIMIT_BURST}
 
         [Service]
         Type=simple

@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
+import json
 import unittest
 
 from relayinner_display.config import (
@@ -126,16 +127,17 @@ class DisplayDaemonTests(unittest.TestCase):
                 ready_actions,
                 [
                     {"type": "display_power", "state": "on", "output": ""},
-                    {"type": "show_waiting", "reason": "vm_stopped"},
+                    {"type": "show_waiting", "reason": "connecting"},
                 ],
             )
+            self.assertEqual(daemon.state.session_state, SessionState.REQUESTING_CONSOLE)
 
             tick_actions = daemon.tick(now=start_time)
             self.assertEqual(
                 tick_actions,
                 [{"type": "connect_spice", "vv_path": str(config.runtime.spice_vv_path)}],
             )
-            self.assertEqual(daemon.state.session_state, SessionState.CONNECTING_CONSOLE)
+            self.assertEqual(daemon.state.session_state, SessionState.REQUESTING_CONSOLE)
             self.assertTrue(config.runtime.spice_vv_path.exists())
 
             daemon.handle_session_message({"type": "console_started", "pid": 4321}, now=start_time)
@@ -238,7 +240,7 @@ class DisplayDaemonTests(unittest.TestCase):
             ],
         )
         self.assertEqual(daemon.state.display_power_intent, "on")
-        self.assertEqual(daemon.state.session_state, SessionState.CONNECTING_CONSOLE)
+        self.assertEqual(daemon.state.session_state, SessionState.REQUESTING_CONSOLE)
 
     def test_status_poll_failure_preserves_console_and_display(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -468,6 +470,69 @@ class DisplayDaemonTests(unittest.TestCase):
             daemon.state.last_error,
             "Host power-button handling is not disabled",
         )
+
+    def test_missing_required_binary_enters_degraded_with_clear_reason(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            config = build_config(Path(temp_dir))
+            daemon = DisplayDaemon(
+                config=config,
+                proxmox=FakeProxmoxClient(["running"]),
+                dependency_finder=lambda name: None if name == "remote-viewer" else f"/usr/bin/{name}",
+            )
+            start_time = datetime(2026, 4, 4, 0, 0, tzinfo=timezone.utc)
+
+            daemon.prepare_runtime()
+            daemon.start(now=start_time)
+            actions = daemon.handle_session_message({"type": "session_ready"}, now=start_time)
+
+        self.assertEqual(actions, [{"type": "show_waiting", "reason": "degraded"}])
+        self.assertEqual(daemon.state.session_state, SessionState.DEGRADED)
+        self.assertEqual(daemon.state.degraded_reason, "Missing required binary: remote-viewer")
+
+    def test_repeated_proxmox_failures_enter_degraded_after_retry_budget(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            config = build_config(Path(temp_dir))
+            daemon = DisplayDaemon(config=config, proxmox=FailingProxmoxClient())
+            start_time = datetime(2026, 4, 4, 0, 0, tzinfo=timezone.utc)
+
+            daemon.prepare_runtime()
+            daemon.start(now=start_time)
+            daemon.session_ready = True
+
+            actions: list[dict[str, object]] = []
+            for attempt in range(5):
+                actions = daemon.tick(now=start_time + timedelta(seconds=attempt * 10))
+
+        self.assertEqual(actions, [{"type": "show_waiting", "reason": "degraded"}])
+        self.assertEqual(daemon.state.session_state, SessionState.DEGRADED)
+        self.assertEqual(daemon.state.degraded_reason, "qm failed: missing VM")
+
+    def test_state_file_includes_spec15_operational_fields(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            config = build_config(Path(temp_dir))
+            proxmox = FakeProxmoxClient(["running", "running"])
+            daemon = DisplayDaemon(config=config, proxmox=proxmox)
+            start_time = datetime(2026, 4, 4, 0, 0, tzinfo=timezone.utc)
+
+            daemon.prepare_runtime()
+            daemon.start(now=start_time)
+            daemon.handle_session_message({"type": "session_ready"}, now=start_time)
+            daemon.tick(now=start_time)
+            daemon.handle_session_message({"type": "console_started", "pid": 4321}, now=start_time)
+            daemon.handle_session_message(
+                {"type": "console_exited", "code": 1, "signal": 0},
+                now=start_time + timedelta(seconds=1),
+            )
+
+            payload = json.loads(config.runtime.daemon_state_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(payload["appliance_state"], "reconnecting_console")
+        self.assertTrue(payload["session_ready"])
+        self.assertEqual(payload["vm_power_state"], "running")
+        self.assertEqual(payload["display_power_applied"], "on")
+        self.assertIsNone(payload["degraded_reason"])
+        self.assertEqual(payload["last_console_exit"]["code"], 1)
+        self.assertEqual(payload["last_console_exit"]["signal"], 0)
 
 
 def build_config(

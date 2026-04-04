@@ -6,7 +6,7 @@ The target outcome is a small appliance-like runtime that takes one VM managed b
 
 ## Status
 
-This repository now includes the first five runtime slices for the MVP.
+This repository now includes all six runtime slices for the MVP.
 
 - The MVP architecture and behavior are defined in `./specs`.
 - Spec 10 now has a Python implementation for config loading, daemon/session IPC, local Proxmox command wrappers, SPICE `.vv` generation, and reconnect state handling.
@@ -14,8 +14,8 @@ This repository now includes the first five runtime slices for the MVP.
 - Spec 12 now adds display-policy config, daemon-side VM power to DPMS mapping, delayed display sleep, and power-intent reapplication after session reconnect.
 - Spec 13 now extends the daemon with host power-button validation, evdev button capture, debounced guest start/shutdown forwarding, and runtime button-action tracking.
 - Spec 14 now adds the host-direct bootstrap layer: a checked-in `install.sh`, sample config, setup guide, logind override rendering, and managed systemd unit installation for the daemon, kiosk, and seat runtime.
+- Spec 15 now hardens the appliance integration layer with the final MVP state-file contract, runtime dependency validation, repeated Proxmox-failure degradation, subsystem-scoped journald logging, and systemd restart-loop thresholds.
 - The current design still assumes direct installation on a Proxmox host, not an LXC container.
-- Final failure-policy and ops hardening remain pending in Spec 15.
 
 ## MVP Goals
 
@@ -49,12 +49,12 @@ Current implementation coverage:
 
 - `relayinner_display.config` validates the shared TOML config model from Specs 10, 12, and 13.
 - `relayinner_display.proxmox` wraps local `qm` and `pvesh` calls, writes `remote-viewer` `.vv` files, and submits guest start/shutdown requests.
-- `relayinner_display.daemon` owns the VM/session state machine, evaluates VM power to display-power policy, debounces display sleep, captures host power-button intent, and writes the expanded runtime state to disk.
+- `relayinner_display.daemon` now owns the end-to-end appliance state machine, validates required runtime binaries, degrades after repeated local Proxmox failures, captures host power-button intent, and writes the Spec 15 runtime state contract to disk.
 - `relayinner_display.input` validates host `logind` power-key policy and captures `KEY_POWER` presses from one evdev node.
-- `relayinner_display.session` supervises `remote-viewer`, tracks waiting/degraded/display-sleeping session state, applies `wlopm`-style display-power actions from the Wayland session context, and reapplies daemon power intent after reconnect.
+- `relayinner_display.session` supervises `remote-viewer`, tracks waiting/degraded/display-sleeping session state, applies `wlopm`-style display-power actions from the Wayland session context, and emits subsystem-scoped session, console, and display logs.
 - `relayinner_display.kiosk` provides the Cage session entrypoint and the canonical `seatd-launch -- cage -- ...` command shape from Spec 11.
-- `relayinner_display.bootstrap` renders the sample config, systemd units, and logind override, and applies the direct-host installer flow from Spec 14.
-- `tests/` covers config parsing, IPC validation, Proxmox command handling, reconnect logic, daemon DPMS debounce behavior, session supervision, logind policy parsing, power-button handling, display-power handling, and kiosk entrypoint wiring.
+- `relayinner_display.bootstrap` renders the sample config, systemd units, logind override, and the Spec 15 `StartLimitIntervalSec=120` / `StartLimitBurst=5` restart-loop policy.
+- `tests/` now cover config parsing, IPC validation, Proxmox command handling, reconnect logic, daemon DPMS debounce behavior, Spec 15 state persistence, runtime dependency degradation, restart-threshold rendering, session supervision, logind policy parsing, power-button handling, display-power handling, and kiosk entrypoint wiring.
 
 Operationally, the appliance is expected to move through a small state machine:
 
@@ -102,6 +102,8 @@ The current implementation now manages:
 - a non-login runtime user through `install.sh`
 - a `logind` override for host power-button behavior
 - runtime state under `/run/relayinner-display/`
+- subsystem-scoped journald observability for `proxmox`, `session`, `console`, `display`, and `input`
+- restart-loop thresholds of 5 failures within 2 minutes for the managed systemd units
 - a checked-in sample config and host setup guide
 
 ## Repository Layout
@@ -129,7 +131,7 @@ The current implementation now manages:
 
 ## Intended Operator Experience
 
-After the project is implemented, the intended flow is:
+After the project is installed, the intended flow is:
 
 1. Install the runtime on a Proxmox host that has a directly attached monitor.
 2. Configure one target `vmid`.
@@ -138,6 +140,7 @@ After the project is implemented, the intended flow is:
 5. If the VM is running, the guest appears fullscreen.
 6. If the VM is off, the display waits briefly and then sleeps.
 7. Pressing the host power button starts the VM when it is off, or requests graceful shutdown when it is on.
+8. If a local dependency or repeated control-path failure occurs, the monitor stays on a controlled degraded view and the reason is visible in journald plus `/run/relayinner-display/daemon.state.json`.
 
 ## Notes
 

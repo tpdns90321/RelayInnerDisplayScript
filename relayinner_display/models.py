@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
+from typing import Any
 import json
 import os
 import tempfile
@@ -14,11 +15,13 @@ class SessionState(str, Enum):
     WAITING_FOR_SESSION = "waiting_for_session"
     WAITING_FOR_VM = "waiting_for_vm"
     REQUESTING_CONSOLE = "requesting_console"
-    CONNECTING_CONSOLE = "connecting_console"
     SHOWING_CONSOLE = "showing_console"
     RECONNECTING_CONSOLE = "reconnecting_console"
     DISPLAY_SLEEPING = "display_sleeping"
     DEGRADED = "degraded"
+
+    def public_value(self) -> str:
+        return self.value
 
 
 @dataclass
@@ -26,9 +29,12 @@ class RuntimeState:
     vmid: int
     node_name: str
     vm_power_state: str = "unknown"
+    session_ready: bool = False
     display_power_intent: str = "on"
     display_power_applied: str = "on"
     session_state: SessionState = SessionState.BOOTING
+    degraded_reason: str | None = None
+    last_console_exit: dict[str, str | int] | None = None
     last_connect_attempt_at: str | None = None
     power_state_since: str | None = None
     last_power_button_at: str | None = None
@@ -49,14 +55,25 @@ class RuntimeState:
         self.last_power_button_result = result
         self.power_button_action_in_flight = result == "submitted"
 
-    def to_dict(self) -> dict[str, str | int | bool | None]:
+    def mark_console_exit(self, when: datetime, code: int, signal: int) -> None:
+        self.last_console_exit = {
+            "at": when.isoformat().replace("+00:00", "Z"),
+            "code": code,
+            "signal": signal,
+        }
+
+    def to_dict(self) -> dict[str, Any]:
         return {
             "vmid": self.vmid,
             "node_name": self.node_name,
+            "appliance_state": self.session_state.public_value(),
+            "session_state": self.session_state.value,
             "vm_power_state": self.vm_power_state,
+            "session_ready": self.session_ready,
             "display_power_intent": self.display_power_intent,
             "display_power_applied": self.display_power_applied,
-            "session_state": self.session_state.value,
+            "degraded_reason": self.degraded_reason,
+            "last_console_exit": self.last_console_exit,
             "last_connect_attempt_at": self.last_connect_attempt_at,
             "power_state_since": self.power_state_since,
             "last_power_button_at": self.last_power_button_at,

@@ -3,7 +3,8 @@ from __future__ import annotations
 from argparse import ArgumentParser
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from shutil import which
+from typing import Any, Callable
 import grp
 import logging
 import os
@@ -11,7 +12,7 @@ import pwd
 import socket
 import time
 
-from .config import AppConfig, load_config
+from .config import AppConfig, ConfigError, build_fallback_config, load_config
 from .input import EvdevPowerButtonSource, LogindPowerButtonPolicyChecker, PowerButtonError
 from .ipc import decode_message, encode_message, validate_session_message
 from .models import RuntimeState, SessionState, write_runtime_state
@@ -25,10 +26,17 @@ DISPLAY_ON_VM_STATES = {"running", "paused", "suspended"}
 DISPLAY_OFF_VM_STATES = {"stopped", "shutdown"}
 POWER_BUTTON_RUNNING_VM_STATES = {"running", "paused"}
 POWER_BUTTON_STOPPED_VM_STATES = {"stopped", "shutdown"}
+PROXMOX_FAILURE_LIMIT = 5
+PROXMOX_FAILURE_WINDOW = timedelta(minutes=2)
+REQUIRED_DAEMON_BINARIES = ("remote-viewer",)
 
 
 def utcnow() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def subsystem_logger(namespace: str, subsystem: str) -> logging.Logger:
+    return logging.getLogger(f"{namespace}.{subsystem}")
 
 
 class SessionSocketServer:
@@ -134,10 +142,18 @@ class DisplayDaemon:
         logger: logging.Logger | None = None,
         power_button_source: Any | None = None,
         host_policy_checker: Any | None = None,
+        dependency_finder: Callable[[str], str | None] | None = None,
+        startup_error: str | None = None,
     ) -> None:
         self.config = config
         self.proxmox = proxmox
         self.logger = logger or logging.getLogger(config.runtime.log_namespace)
+        self.namespace = self.logger.name
+        self.proxmox_logger = subsystem_logger(self.namespace, "proxmox")
+        self.session_logger = subsystem_logger(self.namespace, "session")
+        self.console_logger = subsystem_logger(self.namespace, "console")
+        self.display_logger = subsystem_logger(self.namespace, "display")
+        self.input_logger = subsystem_logger(self.namespace, "input")
         self.state = RuntimeState(vmid=config.target.vmid, node_name="")
         self.session_ready = False
         self.console_running = False
@@ -149,9 +165,15 @@ class DisplayDaemon:
         self._startup_display_policy_pending = True
         self.power_button_source = power_button_source
         self.host_policy_checker = host_policy_checker
-        self.startup_error: str | None = None
+        self.dependency_finder = dependency_finder or which
+        self.validate_runtime_dependencies = dependency_finder is not None or isinstance(
+            proxmox,
+            ProxmoxClient,
+        )
+        self.startup_error = startup_error
         self.last_power_button_accepted_at: datetime | None = None
         self.power_button_action_started_at: datetime | None = None
+        self.proxmox_failure_timestamps: list[datetime] = []
 
     def prepare_runtime(self) -> None:
         self.config.runtime.run_dir.mkdir(parents=True, exist_ok=True)
@@ -161,36 +183,47 @@ class DisplayDaemon:
         for path in (
             self.config.runtime.control_socket,
             self.config.runtime.spice_vv_path,
-            self.config.runtime.daemon_state_path,
         ):
             if path.exists():
                 path.unlink()
 
     def start(self, now: datetime | None = None) -> None:
         self.started_at = now or utcnow()
+        if self.startup_error is not None:
+            self._set_startup_error(self.startup_error)
+            self._persist_state()
+            self.session_logger.error("Daemon started in degraded mode: %s", self.startup_error)
+            return
+
         self.state.node_name = self.proxmox.resolve_node_name(self.config.target.node_name)
         try:
+            if self.validate_runtime_dependencies:
+                self._validate_runtime_dependencies()
             self._prepare_power_button_capture()
         except PowerButtonError as exc:
             self._set_startup_error(str(exc))
             self._persist_state()
-            self.logger.error("Daemon started in degraded mode: %s", exc)
+            self.session_logger.error("Daemon started in degraded mode: %s", exc)
             return
 
         self._transition(SessionState.WAITING_FOR_SESSION)
         self._persist_state()
-        self.logger.info("Daemon started for VM %s on node %s", self.state.vmid, self.state.node_name)
+        self.session_logger.info(
+            "Daemon started for VM %s on node %s",
+            self.state.vmid,
+            self.state.node_name,
+        )
 
     def on_session_disconnected(self) -> None:
         self.session_ready = False
         self.console_running = False
         self.console_pid = None
-        if self.startup_error is not None:
+        if self.startup_error is not None or self.state.degraded_reason is not None:
             self._transition(SessionState.DEGRADED)
         else:
             self._transition(SessionState.WAITING_FOR_SESSION)
         self._persist_state()
-        self.logger.warning("Session disconnected")
+        self.session_logger.warning("Session disconnected")
 
     def handle_session_message(
         self,
@@ -205,18 +238,30 @@ class DisplayDaemon:
             self.session_ready = True
             self.console_running = False
             self.console_pid = None
-            self.logger.info("Session ready")
-            if self.startup_error is not None:
+            self.session_logger.info("Session ready")
+            if self.startup_error is not None or self.state.degraded_reason is not None:
                 self._transition(SessionState.DEGRADED)
                 self._persist_state()
                 return [{"type": "show_waiting", "reason": "degraded"}]
 
             responses: list[dict[str, object]] = []
             responses.extend(self._reapply_display_power())
-            if self._vm_can_show_console(self.state.vm_power_state):
-                self._transition(SessionState.RECONNECTING_CONSOLE)
+            vm_status, failure_actions = self._refresh_vm_status(timestamp)
+            if vm_status is None:
+                if self.state.session_state is SessionState.DEGRADED:
+                    return responses + failure_actions + [{"type": "show_waiting", "reason": "degraded"}]
+                self._transition(self._waiting_session_state())
                 self._persist_state()
-                responses.append({"type": "show_waiting", "reason": "reconnecting"})
+                return responses + failure_actions + [{"type": "show_waiting", "reason": "vm_stopped"}]
+            if self._vm_can_show_console(self.state.vm_power_state):
+                waiting_reason = "reconnecting" if self.next_reconnect_at is not None else "connecting"
+                self._transition(
+                    SessionState.RECONNECTING_CONSOLE
+                    if waiting_reason == "reconnecting"
+                    else SessionState.REQUESTING_CONSOLE
+                )
+                self._persist_state()
+                responses.append({"type": "show_waiting", "reason": waiting_reason})
                 return responses
 
             self._transition(self._waiting_session_state())
@@ -232,7 +277,7 @@ class DisplayDaemon:
             self.state.last_error = None
             self._transition(SessionState.SHOWING_CONSOLE)
             self._persist_state()
-            self.logger.info("Console started with pid=%s", self.console_pid)
+            self.console_logger.info("remote-viewer started with pid=%s", self.console_pid)
             return []
 
         if message_type == "display_power_applied":
@@ -240,7 +285,7 @@ class DisplayDaemon:
             if not self.console_running and not self._vm_can_show_console(self.state.vm_power_state):
                 self._transition(self._waiting_session_state())
             self._persist_state()
-            self.logger.info("Display power applied in session: %s", payload["state"])
+            self.display_logger.info("Display power applied in session: %s", payload["state"])
             return []
 
         if message_type == "console_exited":
@@ -248,6 +293,7 @@ class DisplayDaemon:
             self.console_pid = None
             exit_code = int(payload["code"])
             exit_signal = int(payload["signal"])
+            self.state.mark_console_exit(timestamp, exit_code, exit_signal)
             self.state.last_error = (
                 f"remote-viewer exited unexpectedly (code={exit_code}, signal={exit_signal})"
             )
@@ -255,7 +301,7 @@ class DisplayDaemon:
                 self._schedule_reconnect(timestamp)
                 self._transition(SessionState.RECONNECTING_CONSOLE)
                 self._persist_state()
-                self.logger.warning("%s", self.state.last_error)
+                self.console_logger.warning("%s", self.state.last_error)
                 return [{"type": "show_waiting", "reason": "reconnecting"}]
 
             self._transition(self._waiting_session_state())
@@ -265,26 +311,20 @@ class DisplayDaemon:
         if message_type == "session_error":
             self.console_running = False
             self.console_pid = None
-            self.state.last_error = str(payload["reason"])
-            self._transition(SessionState.DEGRADED)
-            self._persist_state()
-            self.logger.error("Session error: %s", self.state.last_error)
-            return [{"type": "show_waiting", "reason": "degraded"}]
+            return self._enter_degraded(str(payload["reason"]), subsystem="session")
 
         raise AssertionError(f"Unhandled session message type: {message_type}")
 
     def tick(self, now: datetime | None = None) -> list[dict[str, object]]:
         timestamp = now or utcnow()
         actions = self._poll_power_button_source(timestamp)
-        if self.startup_error is not None:
+        if self.startup_error is not None or self.state.degraded_reason is not None:
             return actions
 
-        try:
-            vm_status = self.proxmox.get_vm_status(self.config.target.vmid)
-        except ProxmoxCommandError as exc:
-            return actions + self._handle_status_poll_failure(str(exc))
+        vm_status, failure_actions = self._refresh_vm_status(timestamp)
+        if vm_status is None:
+            return actions + failure_actions
 
-        self._record_vm_power_state(vm_status, timestamp)
         self._refresh_power_button_action(timestamp, vm_status)
         display_actions = self._update_display_power_intent(timestamp)
         if not self.session_ready:
@@ -338,14 +378,15 @@ class DisplayDaemon:
                 self.logger,
             )
         except ProxmoxCommandError as exc:
-            return actions + self._enter_degraded(str(exc))
+            return actions + display_actions + self._record_proxmox_failure(timestamp, str(exc))
 
+        self._clear_proxmox_failures()
         self.state.last_error = None
         self.state.mark_connect_attempt(timestamp)
         self.next_reconnect_at = None
-        self._transition(SessionState.CONNECTING_CONSOLE)
+        self._transition(SessionState.REQUESTING_CONSOLE)
         self._persist_state()
-        self.logger.info("Prepared SPICE config for VM %s", self.state.vmid)
+        self.console_logger.info("Prepared SPICE config for VM %s", self.state.vmid)
         return actions + display_actions + [
             {"type": "connect_spice", "vv_path": str(self.config.runtime.spice_vv_path)}
         ]
@@ -368,7 +409,7 @@ class DisplayDaemon:
         source.open()
         self.host_policy_checker = checker
         self.power_button_source = source
-        self.logger.info(
+        self.input_logger.info(
             "Power-button forwarding enabled from %s",
             self.config.input.power_button_event,
         )
@@ -384,7 +425,7 @@ class DisplayDaemon:
         except (OSError, PowerButtonError) as exc:
             self._set_startup_error(f"Power-button device read failed: {exc}")
             self._persist_state()
-            self.logger.error("Power-button forwarding disabled after read failure: %s", exc)
+            self.input_logger.error("Power-button forwarding disabled after read failure: %s", exc)
             return []
 
         for _ in range(press_count):
@@ -392,21 +433,21 @@ class DisplayDaemon:
         return []
 
     def _handle_power_button_press(self, timestamp: datetime) -> None:
-        try:
-            vm_status = self.proxmox.get_vm_status(self.config.target.vmid)
-        except ProxmoxCommandError as exc:
+        vm_status, _ = self._refresh_vm_status(timestamp)
+        if vm_status is None:
             self.state.last_power_button_result = "status_failed"
-            self.state.last_error = str(exc)
             self._persist_state()
-            self.logger.error("Ignored power-button press because VM status could not be read: %s", exc)
+            self.input_logger.error(
+                "Ignored power-button press because VM status could not be read: %s",
+                self.state.last_error,
+            )
             return
 
-        self.state.vm_power_state = vm_status
         self._refresh_power_button_action(timestamp, vm_status)
         if self.state.power_button_action_in_flight:
             self.state.last_power_button_result = "ignored_in_flight"
             self._persist_state()
-            self.logger.info(
+            self.input_logger.info(
                 "Ignored power-button press while action=%s remains in flight",
                 self.state.last_power_button_action,
             )
@@ -415,7 +456,7 @@ class DisplayDaemon:
         if self._within_power_button_debounce(timestamp):
             self.state.last_power_button_result = "ignored_debounced"
             self._persist_state()
-            self.logger.info(
+            self.input_logger.info(
                 "Ignored power-button press within debounce window (%sms)",
                 self.config.input.debounce_ms,
             )
@@ -433,7 +474,7 @@ class DisplayDaemon:
         else:
             self.state.last_power_button_result = "ignored_non_actionable"
             self._persist_state()
-            self.logger.info(
+            self.input_logger.info(
                 "Ignored power-button press for non-actionable VM state=%s",
                 vm_status,
             )
@@ -446,7 +487,7 @@ class DisplayDaemon:
             self.state.mark_power_button_press(timestamp, action, "failed")
             self.state.last_error = str(exc)
             self._persist_state()
-            self.logger.error(
+            self.proxmox_logger.error(
                 "Power-button action failed: action=%s vmid=%s error=%s",
                 action,
                 self.state.vmid,
@@ -454,12 +495,13 @@ class DisplayDaemon:
             )
             return
 
+        self._clear_proxmox_failures()
         self.last_power_button_accepted_at = timestamp
         self.power_button_action_started_at = timestamp
         self.state.mark_power_button_press(timestamp, action, "submitted")
         self.state.last_error = None
         self._persist_state()
-        self.logger.info(
+        self.input_logger.info(
             "Accepted power-button press: action=%s vmid=%s vm_state=%s",
             action,
             self.state.vmid,
@@ -476,7 +518,7 @@ class DisplayDaemon:
                 self.state.power_button_action_in_flight = False
                 self.state.last_power_button_result = "completed"
                 self.power_button_action_started_at = None
-                self.logger.info("Observed completion of in-flight power-button start action")
+                self.input_logger.info("Observed completion of in-flight power-button start action")
                 return
             if (
                 self.power_button_action_started_at is not None
@@ -486,7 +528,10 @@ class DisplayDaemon:
                 self.state.power_button_action_in_flight = False
                 self.state.last_power_button_result = "stalled"
                 self.power_button_action_started_at = None
-                self.logger.warning("In-flight power-button start action stalled in state=%s", vm_status)
+                self.input_logger.warning(
+                    "In-flight power-button start action stalled in state=%s",
+                    vm_status,
+                )
                 return
 
         if action == "shutdown":
@@ -494,7 +539,7 @@ class DisplayDaemon:
                 self.state.power_button_action_in_flight = False
                 self.state.last_power_button_result = "completed"
                 self.power_button_action_started_at = None
-                self.logger.info("Observed completion of in-flight power-button shutdown action")
+                self.input_logger.info("Observed completion of in-flight power-button shutdown action")
                 return
             if (
                 self.power_button_action_started_at is not None
@@ -505,7 +550,7 @@ class DisplayDaemon:
                 self.state.power_button_action_in_flight = False
                 self.state.last_power_button_result = "timed_out"
                 self.power_button_action_started_at = None
-                self.logger.warning(
+                self.input_logger.warning(
                     "In-flight power-button shutdown action timed out in state=%s",
                     vm_status,
                 )
@@ -513,6 +558,7 @@ class DisplayDaemon:
     def _set_startup_error(self, reason: str) -> None:
         self.startup_error = reason
         self.state.last_error = reason
+        self.state.degraded_reason = reason
         self.state.power_button_action_in_flight = False
         self.power_button_action_started_at = None
         self._transition(SessionState.DEGRADED)
@@ -529,14 +575,20 @@ class DisplayDaemon:
     def _elapsed_ms(self, start: datetime, end: datetime) -> int:
         return int((end - start).total_seconds() * 1000)
 
-    def _enter_degraded(self, reason: str) -> list[dict[str, object]]:
+    def _enter_degraded(
+        self,
+        reason: str,
+        *,
+        subsystem: str = "session",
+    ) -> list[dict[str, object]]:
         had_console = self.console_running or self.console_pid is not None
         self.console_running = False
         self.console_pid = None
         self.state.last_error = reason
+        self.state.degraded_reason = reason
         self._transition(SessionState.DEGRADED)
         self._persist_state()
-        self.logger.error("Entering degraded mode: %s", reason)
+        subsystem_logger(self.namespace, subsystem).error("Entering degraded mode: %s", reason)
         actions: list[dict[str, object]] = []
         if had_console:
             actions.append({"type": "disconnect_console", "reason": "control_error"})
@@ -557,12 +609,48 @@ class DisplayDaemon:
             self.state.mark_power_state_since(now)
         self.state.vm_power_state = vm_status
 
-    def _handle_status_poll_failure(self, reason: str) -> list[dict[str, object]]:
-        if self.state.last_error != reason:
-            self.logger.warning("VM status poll failed: %s", reason)
+    def _validate_runtime_dependencies(self) -> None:
+        required = [*REQUIRED_DAEMON_BINARIES, self.config.display.power_helper]
+        seen: set[str] = set()
+        for binary in required:
+            if binary in seen:
+                continue
+            seen.add(binary)
+            if self.dependency_finder(binary) is None:
+                raise PowerButtonError(f"Missing required binary: {binary}")
+
+    def _refresh_vm_status(self, now: datetime) -> tuple[str | None, list[dict[str, object]]]:
+        try:
+            vm_status = self.proxmox.get_vm_status(self.config.target.vmid)
+        except ProxmoxCommandError as exc:
+            return None, self._record_proxmox_failure(now, str(exc))
+
+        self._clear_proxmox_failures()
+        self._record_vm_power_state(vm_status, now)
+        return vm_status, []
+
+    def _record_proxmox_failure(self, now: datetime, reason: str) -> list[dict[str, object]]:
+        self.proxmox_failure_timestamps = [
+            timestamp
+            for timestamp in self.proxmox_failure_timestamps
+            if now - timestamp <= PROXMOX_FAILURE_WINDOW
+        ]
+        self.proxmox_failure_timestamps.append(now)
         self.state.last_error = reason
+        self.proxmox_logger.warning(
+            "Command failure %s/%s within %ss: %s",
+            len(self.proxmox_failure_timestamps),
+            PROXMOX_FAILURE_LIMIT,
+            int(PROXMOX_FAILURE_WINDOW.total_seconds()),
+            reason,
+        )
+        if len(self.proxmox_failure_timestamps) >= PROXMOX_FAILURE_LIMIT:
+            return self._enter_degraded(reason, subsystem="proxmox")
         self._persist_state()
         return []
+
+    def _clear_proxmox_failures(self) -> None:
+        self.proxmox_failure_timestamps.clear()
 
     def _update_display_power_intent(self, now: datetime) -> list[dict[str, object]]:
         target_intent = self._desired_display_power_intent(now)
@@ -571,7 +659,7 @@ class DisplayDaemon:
 
         previous_intent = self.state.display_power_intent
         self.state.display_power_intent = target_intent
-        self.logger.info(
+        self.display_logger.info(
             "Display power intent changed: %s -> %s (vm_state=%s)",
             previous_intent,
             target_intent,
@@ -635,14 +723,17 @@ class DisplayDaemon:
 
     def _transition(self, session_state: SessionState) -> None:
         if self.state.session_state != session_state:
-            self.logger.info(
+            self.session_logger.info(
                 "State transition: %s -> %s",
-                self.state.session_state.value,
-                session_state.value,
+                self.state.session_state.public_value(),
+                session_state.public_value(),
             )
         self.state.session_state = session_state
+        if session_state is not SessionState.DEGRADED:
+            self.state.degraded_reason = None
 
     def _persist_state(self) -> None:
+        self.state.session_ready = self.session_ready
         write_runtime_state(self.config.runtime.daemon_state_path, self.state)
 
 
@@ -669,12 +760,19 @@ def configure_logging(namespace: str) -> logging.Logger:
 
 
 def run(config_path: Path) -> int:
-    config = load_config(config_path)
+    startup_error: str | None = None
+    try:
+        config = load_config(config_path)
+    except ConfigError as exc:
+        config = build_fallback_config()
+        startup_error = f"Invalid config: {exc}"
+
     logger = configure_logging(config.runtime.log_namespace)
     daemon = DisplayDaemon(
         config=config,
         proxmox=ProxmoxClient(timeout_s=config.policy.command_timeout_s),
         logger=logger,
+        startup_error=startup_error,
     )
     socket_server = SessionSocketServer(config.runtime.control_socket, logger)
 

@@ -11,11 +11,14 @@ from relayinner_display.bootstrap import (
     HostInstallPaths,
     REQUIRED_PACKAGES,
     REQUIRED_SERVICES,
+    SYSTEMD_START_LIMIT_BURST,
+    SYSTEMD_START_LIMIT_INTERVAL_SEC,
     build_installed_daemon_command,
     build_installed_kiosk_command,
     build_installed_seatd_command,
     render_daemon_service,
     render_kiosk_service,
+    render_seatd_service,
     render_logind_override,
     render_sample_config,
 )
@@ -84,15 +87,20 @@ class BootstrapTests(unittest.TestCase):
     def test_rendered_services_include_required_units_and_restart_policy(self) -> None:
         daemon_unit = render_daemon_service()
         kiosk_unit = render_kiosk_service()
+        seatd_unit = render_seatd_service()
 
         self.assertIn(
             "ExecStart=/usr/bin/python3 /usr/local/lib/relayinner-display/relayinner-displayd --config /etc/relayinner-display/config.toml",
             daemon_unit,
         )
         self.assertIn("Restart=always", daemon_unit)
+        self.assertIn(f"StartLimitIntervalSec={SYSTEMD_START_LIMIT_INTERVAL_SEC}", daemon_unit)
+        self.assertIn(f"StartLimitBurst={SYSTEMD_START_LIMIT_BURST}", daemon_unit)
         self.assertIn("Requires=relayinner-display-seatd.service relayinner-displayd.service", kiosk_unit)
         self.assertIn("TTYPath=/dev/tty1", kiosk_unit)
         self.assertIn("Environment=SEATD_SOCK=/run/seatd.sock", kiosk_unit)
+        self.assertIn(f"StartLimitIntervalSec={SYSTEMD_START_LIMIT_INTERVAL_SEC}", kiosk_unit)
+        self.assertIn(f"StartLimitBurst={SYSTEMD_START_LIMIT_BURST}", seatd_unit)
 
     def test_validate_host_rejects_missing_proxmox_or_systemd(self) -> None:
         repo_root = Path(__file__).resolve().parents[1]
