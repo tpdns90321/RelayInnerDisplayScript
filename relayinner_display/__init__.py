@@ -4,6 +4,7 @@ __all__ = [
     "config",
     "daemon",
     "ipc",
+    "kiosk",
     "models",
     "proxmox",
     "session",

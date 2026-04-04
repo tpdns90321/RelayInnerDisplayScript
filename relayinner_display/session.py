@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 from argparse import ArgumentParser
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 import logging
 import os
 import socket
@@ -17,6 +18,44 @@ DEFAULT_CONFIG_PATH = Path("/etc/relayinner-display/config.toml")
 
 
 ProcessFactory = Callable[..., subprocess.Popen[str]]
+PowerCommandRunner = Callable[..., subprocess.CompletedProcess[str]]
+
+
+WAITING_STATUS_TEXT = {
+    "connecting": "Connecting",
+    "vm_stopped": "Waiting for VM",
+    "reconnecting": "Connection lost",
+    "degraded": "Degraded",
+}
+DISPLAY_SLEEPING_STATUS = "Display sleeping"
+DEFAULT_WAITING_STATUS = WAITING_STATUS_TEXT["vm_stopped"]
+SESSION_ENV_ALLOWLIST = {
+    "DBUS_SESSION_BUS_ADDRESS",
+    "HOME",
+    "LANG",
+    "LANGUAGE",
+    "LC_ALL",
+    "PATH",
+    "WAYLAND_DISPLAY",
+    "XDG_RUNTIME_DIR",
+    "XDG_SESSION_TYPE",
+}
+
+
+def build_session_env(source_env: Mapping[str, str] | None = None) -> dict[str, str]:
+    source = source_env or os.environ
+    env = {name: value for name, value in source.items() if name in SESSION_ENV_ALLOWLIST}
+    env.setdefault("XDG_SESSION_TYPE", "wayland")
+    return env
+
+
+@dataclass
+class SessionViewState:
+    waiting_reason: str = "vm_stopped"
+    status_text: str = DEFAULT_WAITING_STATUS
+    console_active: bool = False
+    cursor_hidden: bool = False
+    display_power_state: str = "on"
 
 
 class SessionSocketClient:
@@ -90,12 +129,16 @@ class SessionSupervisor:
         config: AppConfig,
         logger: logging.Logger | None = None,
         process_factory: ProcessFactory = subprocess.Popen,
+        power_helper: str = "wlopm",
+        power_command_runner: PowerCommandRunner = subprocess.run,
     ) -> None:
         self.config = config
         self.logger = logger or logging.getLogger(config.runtime.log_namespace)
         self.process_factory = process_factory
+        self.power_helper = power_helper
+        self.power_command_runner = power_command_runner
         self.viewer_process: subprocess.Popen[str] | None = None
-        self.waiting_reason = "vm_stopped"
+        self.view_state = SessionViewState()
         self._suppress_exit_report = False
 
     def session_ready_message(self) -> dict[str, object]:
@@ -106,20 +149,28 @@ class SessionSupervisor:
         message_type = payload["type"]
 
         if message_type == "show_waiting":
-            self.waiting_reason = str(payload["reason"])
+            self.view_state.waiting_reason = str(payload["reason"])
             self._stop_console(report_exit=False)
-            self.logger.info("Waiting state set to %s", self.waiting_reason)
+            self._refresh_view_state()
+            self.logger.info("Waiting state set to %s", self.view_state.waiting_reason)
             return []
 
         if message_type == "disconnect_console":
-            self.waiting_reason = str(payload["reason"])
+            self.view_state.waiting_reason = str(payload["reason"])
             self._stop_console(report_exit=False)
-            self.logger.info("Console disconnected because %s", self.waiting_reason)
+            self._refresh_view_state()
+            self.logger.info("Console disconnected because %s", self.view_state.waiting_reason)
             return []
 
         if message_type == "connect_spice":
             vv_path = str(payload["vv_path"])
             return self._launch_console(vv_path)
+
+        if message_type == "display_power":
+            return self._apply_display_power(
+                state=str(payload["state"]),
+                output=str(payload["output"]),
+            )
 
         if message_type == "health_ping":
             return []
@@ -135,6 +186,8 @@ class SessionSupervisor:
             return None
 
         self.viewer_process = None
+        self.view_state.waiting_reason = "reconnecting"
+        self._refresh_view_state()
         if self._suppress_exit_report:
             self._suppress_exit_report = False
             return None
@@ -149,29 +202,32 @@ class SessionSupervisor:
 
     def _launch_console(self, vv_path: str) -> list[dict[str, object]]:
         self._stop_console(report_exit=False)
-        self.waiting_reason = "connecting"
+        self.view_state.waiting_reason = "connecting"
         command = ["remote-viewer", "--full-screen", vv_path]
 
         try:
             process = self.process_factory(
                 command,
-                env=self._build_viewer_env(),
+                env=build_session_env(),
                 text=True,
             )
         except OSError as exc:
             reason = f"viewer_launch_failed: {exc}"
-            self.waiting_reason = "degraded"
+            self.view_state.waiting_reason = "degraded"
+            self._refresh_view_state()
             self.logger.error("remote-viewer launch failed: %s", exc)
             return [{"type": "session_error", "reason": reason}]
 
         self.viewer_process = process
         self._suppress_exit_report = False
+        self._refresh_view_state()
         self.logger.info("remote-viewer started with pid=%s", process.pid)
         return [{"type": "console_started", "pid": process.pid}]
 
     def _stop_console(self, report_exit: bool) -> None:
         if self.viewer_process is None:
             self._suppress_exit_report = False
+            self._refresh_view_state()
             return
 
         self._suppress_exit_report = not report_exit
@@ -186,20 +242,52 @@ class SessionSupervisor:
                 self.logger.warning("remote-viewer did not exit after SIGKILL")
         finally:
             self.viewer_process = None
+            self._refresh_view_state()
 
-    def _build_viewer_env(self) -> dict[str, str]:
-        allowed_names = {
-            "DBUS_SESSION_BUS_ADDRESS",
-            "HOME",
-            "LANG",
-            "LANGUAGE",
-            "LC_ALL",
-            "PATH",
-            "WAYLAND_DISPLAY",
-            "XDG_RUNTIME_DIR",
-            "XDG_SESSION_TYPE",
-        }
-        return {name: value for name, value in os.environ.items() if name in allowed_names}
+    def _apply_display_power(self, state: str, output: str) -> list[dict[str, object]]:
+        target_output = output.strip() or "*"
+        command = [self.power_helper, "--on" if state == "on" else "--off", target_output]
+
+        try:
+            completed = self.power_command_runner(
+                command,
+                env=build_session_env(),
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+        except OSError as exc:
+            self.logger.error("Display power helper failed to start: %s", exc)
+            return []
+
+        if completed.returncode != 0:
+            helper_output = (completed.stderr or completed.stdout or "").strip()
+            suffix = f": {helper_output}" if helper_output else ""
+            self.logger.error(
+                "Display power helper exited with %s for state=%s output=%s%s",
+                completed.returncode,
+                state,
+                target_output,
+                suffix,
+            )
+            return []
+
+        self.view_state.display_power_state = state
+        self._refresh_view_state()
+        self.logger.info("Display power applied: state=%s output=%s", state, target_output)
+        return [{"type": "display_power_applied", "state": state}]
+
+    def _refresh_view_state(self) -> None:
+        self.view_state.console_active = self.viewer_process is not None
+        self.view_state.cursor_hidden = self.viewer_process is not None
+        if self.view_state.display_power_state == "off":
+            self.view_state.status_text = DISPLAY_SLEEPING_STATUS
+            return
+
+        self.view_state.status_text = WAITING_STATUS_TEXT.get(
+            self.view_state.waiting_reason,
+            DEFAULT_WAITING_STATUS,
+        )
 
 
 def configure_logging(namespace: str) -> logging.Logger:

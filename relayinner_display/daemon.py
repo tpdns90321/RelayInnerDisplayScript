@@ -199,6 +199,10 @@ class DisplayDaemon:
             self.logger.info("Console started with pid=%s", self.console_pid)
             return []
 
+        if message_type == "display_power_applied":
+            self.logger.info("Display power applied in session: %s", payload["state"])
+            return []
+
         if message_type == "console_exited":
             self.console_running = False
             self.console_pid = None

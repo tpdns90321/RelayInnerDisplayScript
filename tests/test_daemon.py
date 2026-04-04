@@ -120,6 +120,15 @@ class DisplayDaemonTests(unittest.TestCase):
             ],
         )
 
+    def test_display_power_applied_message_is_accepted(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            config = build_config(Path(temp_dir))
+            daemon = DisplayDaemon(config=config, proxmox=FakeProxmoxClient(["stopped"]))
+
+            actions = daemon.handle_session_message({"type": "display_power_applied", "state": "off"})
+
+        self.assertEqual(actions, [])
+
 
 def build_config(root: Path) -> AppConfig:
     run_dir = root / "run"

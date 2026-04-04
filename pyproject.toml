@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "relayinner-display"
 version = "0.1.0"
-description = "SPEC-10 runtime core for RelayInnerDisplayScript"
+description = "SPEC-10/11 runtime core for RelayInnerDisplayScript"
 readme = "README.md"
 requires-python = ">=3.11"
 authors = [
@@ -15,6 +15,7 @@ authors = [
 [project.scripts]
 relayinner-displayd = "relayinner_display.daemon:main"
 relayinner-display-session = "relayinner_display.session:main"
+relayinner-display-session-entrypoint = "relayinner_display.kiosk:main"
 
 [tool.setuptools]
 packages = ["relayinner_display"]

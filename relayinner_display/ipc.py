@@ -20,10 +20,19 @@ def _is_non_empty_string(value: object) -> bool:
     return isinstance(value, str) and bool(value.strip())
 
 
+def _is_string(value: object) -> bool:
+    return isinstance(value, str)
+
+
+def _is_power_state(value: object) -> bool:
+    return value in {"on", "off"}
+
+
 DAEMON_TO_SESSION_FIELDS: dict[str, dict[str, Validator]] = {
     "show_waiting": {"reason": _is_non_empty_string},
     "connect_spice": {"vv_path": _is_non_empty_string},
     "disconnect_console": {"reason": _is_non_empty_string},
+    "display_power": {"state": _is_power_state, "output": _is_string},
     "health_ping": {},
 }
 
@@ -31,6 +40,7 @@ SESSION_TO_DAEMON_FIELDS: dict[str, dict[str, Validator]] = {
     "session_ready": {},
     "console_started": {"pid": _is_integer},
     "console_exited": {"code": _is_integer, "signal": _is_integer},
+    "display_power_applied": {"state": _is_power_state},
     "session_error": {"reason": _is_non_empty_string},
 }
 

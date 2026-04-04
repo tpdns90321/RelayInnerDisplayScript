@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import subprocess
 import unittest
 
 from relayinner_display.config import AppConfig, PolicyConfig, RuntimeConfig, TargetConfig
@@ -46,6 +47,9 @@ class SessionSupervisorTests(unittest.TestCase):
         )
 
         self.assertEqual(events, [{"type": "console_started", "pid": 9001}])
+        self.assertTrue(supervisor.view_state.console_active)
+        self.assertTrue(supervisor.view_state.cursor_hidden)
+        self.assertEqual(supervisor.view_state.status_text, "Connecting")
         self.assertEqual(
             launches[0][0],
             ["remote-viewer", "--full-screen", "/run/relayinner-display/current.vv"],
@@ -64,6 +68,8 @@ class SessionSupervisorTests(unittest.TestCase):
         supervisor.handle_daemon_message({"type": "show_waiting", "reason": "vm_stopped"})
 
         self.assertTrue(process.terminated)
+        self.assertFalse(supervisor.view_state.console_active)
+        self.assertEqual(supervisor.view_state.status_text, "Waiting for VM")
         self.assertIsNone(supervisor.poll_console())
 
     def test_unexpected_exit_reports_console_exited(self) -> None:
@@ -78,10 +84,58 @@ class SessionSupervisorTests(unittest.TestCase):
         )
         process.returncode = 1
 
-        self.assertEqual(
-            supervisor.poll_console(),
-            {"type": "console_exited", "code": 1, "signal": 0},
+        event = supervisor.poll_console()
+
+        self.assertEqual(event, {"type": "console_exited", "code": 1, "signal": 0})
+        self.assertEqual(supervisor.view_state.status_text, "Connection lost")
+
+    def test_display_power_uses_wlopm_and_reports_applied(self) -> None:
+        commands: list[tuple[list[str], dict[str, str]]] = []
+
+        def fake_power_runner(
+            command: list[str],
+            env: dict[str, str],
+            text: bool,
+            capture_output: bool,
+            check: bool,
+        ) -> subprocess.CompletedProcess[str]:
+            commands.append((command, env))
+            return subprocess.CompletedProcess(command, 0, "", "")
+
+        supervisor = SessionSupervisor(
+            config=build_config(),
+            power_command_runner=fake_power_runner,
         )
+
+        events = supervisor.handle_daemon_message(
+            {"type": "display_power", "state": "off", "output": "HDMI-A-1"}
+        )
+
+        self.assertEqual(events, [{"type": "display_power_applied", "state": "off"}])
+        self.assertEqual(commands[0][0], ["wlopm", "--off", "HDMI-A-1"])
+        self.assertEqual(supervisor.view_state.status_text, "Display sleeping")
+
+    def test_display_power_failure_is_nonfatal(self) -> None:
+        def fake_power_runner(
+            command: list[str],
+            env: dict[str, str],
+            text: bool,
+            capture_output: bool,
+            check: bool,
+        ) -> subprocess.CompletedProcess[str]:
+            raise FileNotFoundError("wlopm")
+
+        supervisor = SessionSupervisor(
+            config=build_config(),
+            power_command_runner=fake_power_runner,
+        )
+
+        events = supervisor.handle_daemon_message(
+            {"type": "display_power", "state": "off", "output": ""}
+        )
+
+        self.assertEqual(events, [])
+        self.assertEqual(supervisor.view_state.display_power_state, "on")
 
 
 def build_config() -> AppConfig:
