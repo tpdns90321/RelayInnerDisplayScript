@@ -10,6 +10,8 @@ This directory contains the MVP spec set for a Proxmox-hosted display relay appl
 - `13-host-power-button-to-guest-power-control.md`
 - `14-proxmox-host-runtime-and-bootstrap.md`
 - `15-mvp-integration-failure-policy-and-ops.md`
+- `16-proxmox-host-installation-flow-and-readme-quickstart.md`
+- `17-safe-uninstall-flow-and-readme-removal-guide.md`
 
 ## Product Summary
 
@@ -37,3 +39,5 @@ RelayInnerDisplayScript turns a Proxmox host with an attached monitor into a sin
 3. Spec 12 and Spec 13
 4. Spec 14
 5. Spec 15
+6. Spec 16
+7. Spec 17

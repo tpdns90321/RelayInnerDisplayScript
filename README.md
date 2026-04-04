@@ -76,6 +76,8 @@ Operationally, the appliance is expected to move through a small state machine:
 - [Spec 13: Host Power Button to Guest Power Control](./specs/13-host-power-button-to-guest-power-control.md)
 - [Spec 14: Proxmox Host Runtime and Bootstrap](./specs/14-proxmox-host-runtime-and-bootstrap.md)
 - [Spec 15: MVP Integration, Failure Policy, and Ops](./specs/15-mvp-integration-failure-policy-and-ops.md)
+- [Spec 16: Proxmox Host Installation Flow and README Quickstart](./specs/16-proxmox-host-installation-flow-and-readme-quickstart.md)
+- [Spec 17: Safe Uninstall Flow and README Removal Guide](./specs/17-safe-uninstall-flow-and-readme-removal-guide.md)
 
 Recommended implementation order:
 
@@ -84,6 +86,8 @@ Recommended implementation order:
 3. Spec 12 and Spec 13
 4. Spec 14
 5. Spec 15
+6. Spec 16
+7. Spec 17
 
 ## Expected Host Dependencies
 
