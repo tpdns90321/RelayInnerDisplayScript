@@ -1,0 +1,34 @@
+# RelayInnerDisplay sample config for Proxmox host direct install.
+# Edit vmid and node_name before starting the services for the first time.
+[target]
+vmid = 100
+node_name = "pve"
+guest_os = "windows"
+console_backend = "spice"
+
+[runtime]
+run_dir = "/run/relayinner-display"
+control_socket = "/run/relayinner-display/session.sock"
+spice_vv_path = "/run/relayinner-display/current.vv"
+log_namespace = "relayinner-display"
+
+[policy]
+poll_interval_ms = 2000
+reconnect_initial_ms = 1000
+reconnect_max_ms = 15000
+command_timeout_s = 10
+dpms_policy = "vm-power"
+dpms_off_delay_ms = 5000
+power_state_stabilize_ms = 3000
+power_button_action_when_running = "shutdown"
+power_button_action_when_stopped = "start"
+shutdown_timeout_s = 90
+
+[display]
+output_name = ""
+power_helper = "wlopm"
+
+[input]
+power_button_event = "/dev/input/by-path/platform-i8042-serio-0-event-power"
+forward_power_button = true
+debounce_ms = 2000

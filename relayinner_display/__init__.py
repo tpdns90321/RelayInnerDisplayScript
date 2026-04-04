@@ -1,6 +1,7 @@
 """Core runtime for RelayInnerDisplayScript."""
 
 __all__ = [
+    "bootstrap",
     "config",
     "daemon",
     "input",
