@@ -37,6 +37,8 @@ Installer flags:
 - `./install.sh --skip-package-install` skips the `apt-get` step when the required packages are already present.
 - `./install.sh --replace-config` backs up the existing `/etc/relayinner-display/config.toml` and replaces it with the sample config.
 
+Successful installer runs also rewrite `/var/lib/relayinner-display/install-state.json`. Re-running without `--replace-config` preserves the current config and records `config_state.action=preserved`; re-running with `--replace-config` records `config_state.action=replaced` plus the backup path created during that run.
+
 ## Managed Paths
 
 - `/usr/local/lib/relayinner-display/`
@@ -46,6 +48,7 @@ Installer flags:
 - `/etc/systemd/system/relayinner-display-kiosk.service`
 - `/etc/systemd/system/relayinner-displayd.service`
 - `/etc/systemd/logind.conf.d/relayinner-display.conf`
+- `/var/lib/relayinner-display/install-state.json`
 - `/run/relayinner-display/`
 
 ## Managed Services
@@ -58,6 +61,8 @@ The installer also masks `getty@tty1.service` so the kiosk stack owns `/dev/tty1
 
 For Spec 15, the rendered units also enforce `StartLimitIntervalSec=120` and `StartLimitBurst=5` so repeated crash loops stop being retried indefinitely.
 
+`/var/lib/relayinner-display/install-state.json` is the authoritative record of installer-managed host state for later uninstall or restore work. It records the managed paths, config preservation or replacement result, whether the service user was created during that run, and the pre-install state of `getty@tty1.service` plus `display-manager.service`.
+
 ## Verification
 
 Use these checks after installation:
@@ -65,6 +70,8 @@ Use these checks after installation:
 ```sh
 systemctl status relayinner-display-seatd.service relayinner-displayd.service relayinner-display-kiosk.service
 journalctl -u relayinner-displayd.service -u relayinner-display-kiosk.service -b
+sudo cat /var/lib/relayinner-display/install-state.json
+stat -c '%a %U %G %n' /var/lib/relayinner-display/install-state.json
 cat /run/relayinner-display/daemon.state.json
 ```
 
@@ -90,6 +97,8 @@ grep -R HandlePowerKey /etc/systemd/logind.conf /etc/systemd/logind.conf.d /run/
 ```
 
 ## Troubleshooting
+
+If you need to confirm exactly what the installer changed on the host, inspect `/var/lib/relayinner-display/install-state.json` first. The `config_state` section shows whether the current config was created, preserved, or replaced, and `conflicting_units` captures whether `getty@tty1.service` or `display-manager.service` existed and whether this installer run changed them.
 
 When the appliance is not showing the guest, inspect the state file first:
 

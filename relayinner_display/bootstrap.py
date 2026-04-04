@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from shutil import copy2, copytree, ignore_patterns, rmtree, which
 from typing import Callable, Sequence
+import json
 import os
 import pwd
 import shlex
@@ -34,9 +35,14 @@ REQUIRED_SERVICES = (
     "relayinner-display-kiosk.service",
     "relayinner-displayd.service",
 )
+CONFLICTING_UNITS = (
+    "getty@tty1.service",
+    "display-manager.service",
+)
 DEFAULT_PATH_ENV = "/usr/local/lib/relayinner-display:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 SYSTEMD_START_LIMIT_INTERVAL_SEC = 120
 SYSTEMD_START_LIMIT_BURST = 5
+INSTALL_STATE_SCHEMA_VERSION = 1
 
 
 class BootstrapError(RuntimeError):
@@ -88,17 +94,47 @@ class HostInstallPaths:
     def daemon_service_path(self) -> Path:
         return self.systemd_dir / REQUIRED_SERVICES[2]
 
+    @property
+    def systemd_unit_paths(self) -> tuple[Path, ...]:
+        return (
+            self.seatd_service_path,
+            self.kiosk_service_path,
+            self.daemon_service_path,
+        )
+
+    @property
+    def install_state_path(self) -> Path:
+        return self.service_home / "install-state.json"
+
 
 @dataclass(frozen=True)
 class InstallResult:
-    config_created: bool
-    config_preserved: bool
+    config_action: str
     config_backup_path: Path | None
     manual_steps: tuple[str, ...]
+
+    @property
+    def config_created(self) -> bool:
+        return self.config_action in {"created", "replaced"}
+
+    @property
+    def config_preserved(self) -> bool:
+        return self.config_action == "preserved"
+
+
+@dataclass(frozen=True)
+class ConflictingUnitState:
+    existed: bool
+    enabled_before: bool
+    active_before: bool
+    masked_before: bool
+    changed_by_installer: bool
 
 
 CommandRunner = Callable[..., subprocess.CompletedProcess[str]]
 OutputWriter = Callable[[str], None]
+TimestampProvider = Callable[[], datetime]
+ServiceUserExistsChecker = Callable[[str], bool]
 
 
 def render_sample_config() -> str:
@@ -276,6 +312,8 @@ class HostBootstrapInstaller:
         output: OutputWriter | None = None,
         pveversion_finder: Callable[[str], str | None] = which,
         systemd_runtime_path: Path = SYSTEMD_RUNTIME_PATH,
+        now_provider: TimestampProvider | None = None,
+        service_user_exists_checker: ServiceUserExistsChecker | None = None,
     ) -> None:
         self.repo_root = repo_root.resolve()
         self.install_root = install_root.resolve()
@@ -284,6 +322,8 @@ class HostBootstrapInstaller:
         self.output = output or (lambda message: print(message))
         self.pveversion_finder = pveversion_finder
         self.systemd_runtime_path = systemd_runtime_path
+        self.now_provider = now_provider or (lambda: datetime.now(timezone.utc))
+        self.service_user_exists_checker = service_user_exists_checker or self._lookup_service_user
 
     def install(
         self,
@@ -298,15 +338,20 @@ class HostBootstrapInstaller:
 
         self._verify_repo_layout()
         self.install_packages(skip_package_install=skip_package_install)
-        self.ensure_service_user()
+        service_user_created = self.ensure_service_user()
         self.install_runtime_tree()
         self.install_shared_assets()
         result = self.install_config(replace_config=replace_config)
         self.install_service_units()
         self.install_logind_override()
-        self.configure_conflicting_units()
+        conflicting_units = self.configure_conflicting_units()
         self.daemon_reload()
         self.enable_services()
+        self.write_install_state(
+            result=result,
+            service_user_created=service_user_created,
+            conflicting_units=conflicting_units,
+        )
         self._print_manual_steps(result.manual_steps)
         return result
 
@@ -327,10 +372,10 @@ class HostBootstrapInstaller:
         self._run(["apt-get", "update"])
         self._run(["apt-get", "install", "-y", "--no-install-recommends", *REQUIRED_PACKAGES])
 
-    def ensure_service_user(self) -> None:
-        if self.install_root == DEFAULT_STAGE_ROOT and self._service_user_exists():
+    def ensure_service_user(self) -> bool:
+        if self._service_user_exists():
             self.output(f"System user {SERVICE_USER!r} already exists")
-            return
+            return False
 
         nologin_shell = which("nologin") or NOLOGIN_FALLBACK
         self.output(f"Ensuring system user {SERVICE_USER!r} exists")
@@ -346,6 +391,7 @@ class HostBootstrapInstaller:
                 SERVICE_USER,
             ]
         )
+        return True
 
     def install_runtime_tree(self) -> None:
         self.output(f"Installing runtime package into {self.paths.lib_dir}")
@@ -385,25 +431,23 @@ class HostBootstrapInstaller:
         config_dir = self._stage(self.paths.config_dir)
         config_dir.mkdir(parents=True, exist_ok=True)
         config_path = self._stage(self.paths.config_path)
-        config_created = False
-        config_preserved = False
         config_backup_path: Path | None = None
+        config_action = "created"
 
         if config_path.exists() and not replace_config:
-            config_preserved = True
+            config_action = "preserved"
             self.output(f"Preserving existing operator config at {self.paths.config_path}")
         else:
             if config_path.exists():
+                config_action = "replaced"
                 config_backup_path = self._next_backup_path(config_path)
                 copy2(config_path, config_backup_path)
                 self.output(f"Backed up existing config to {config_backup_path}")
             self._write_text(config_path, render_sample_config(), mode=0o640)
-            config_created = True
             self.output(f"Installed sample config to {self.paths.config_path}")
 
         return InstallResult(
-            config_created=config_created,
-            config_preserved=config_preserved,
+            config_action=config_action,
             config_backup_path=config_backup_path,
             manual_steps=self.build_manual_steps(),
         )
@@ -430,13 +474,20 @@ class HostBootstrapInstaller:
             mode=0o644,
         )
 
-    def configure_conflicting_units(self) -> None:
-        self.output("Masking conflicting tty1 services")
-        self._run_optional(["systemctl", "disable", "--now", "getty@tty1.service"])
-        self._run_optional(["systemctl", "mask", "getty@tty1.service"])
-        if self._unit_exists("display-manager.service"):
-            self._run_optional(["systemctl", "disable", "--now", "display-manager.service"])
-            self._run_optional(["systemctl", "mask", "display-manager.service"])
+    def configure_conflicting_units(self) -> dict[str, ConflictingUnitState]:
+        self.output("Applying conflicting unit policy")
+        conflicting_units: dict[str, ConflictingUnitState] = {}
+        for unit_name in CONFLICTING_UNITS:
+            initial_state = self._capture_conflicting_unit_state(unit_name)
+            changed_by_installer = self._configure_conflicting_unit(unit_name, initial_state)
+            conflicting_units[unit_name] = ConflictingUnitState(
+                existed=initial_state.existed,
+                enabled_before=initial_state.enabled_before,
+                active_before=initial_state.active_before,
+                masked_before=initial_state.masked_before,
+                changed_by_installer=changed_by_installer,
+            )
+        return conflicting_units
 
     def daemon_reload(self) -> None:
         self.output("Reloading systemd")
@@ -445,6 +496,51 @@ class HostBootstrapInstaller:
     def enable_services(self) -> None:
         self.output("Enabling relay services")
         self._run(["systemctl", "enable", *REQUIRED_SERVICES])
+
+    def write_install_state(
+        self,
+        *,
+        result: InstallResult,
+        service_user_created: bool,
+        conflicting_units: dict[str, ConflictingUnitState],
+    ) -> None:
+        install_state = {
+            "schema_version": INSTALL_STATE_SCHEMA_VERSION,
+            "installed_at": self._format_timestamp(self.now_provider()),
+            "managed_paths": {
+                "lib_dir": str(self.paths.lib_dir),
+                "share_dir": str(self.paths.share_dir),
+                "config_dir": str(self.paths.config_dir),
+                "config_path": str(self.paths.config_path),
+                "logind_override_path": str(self.paths.logind_override_path),
+                "service_home": str(self.paths.service_home),
+                "systemd_units": [str(path) for path in self.paths.systemd_unit_paths],
+            },
+            "config_state": {
+                "action": result.config_action,
+                "backup_path": str(result.config_backup_path) if result.config_backup_path is not None else None,
+            },
+            "service_user": {
+                "name": SERVICE_USER,
+                "created_by_installer": service_user_created,
+            },
+            "conflicting_units": {
+                unit_name: {
+                    "existed": state.existed,
+                    "enabled_before": state.enabled_before,
+                    "active_before": state.active_before,
+                    "masked_before": state.masked_before,
+                    "changed_by_installer": state.changed_by_installer,
+                }
+                for unit_name, state in conflicting_units.items()
+            },
+        }
+        self.output(f"Writing install-state record to {self.paths.install_state_path}")
+        self._write_text(
+            self._stage(self.paths.install_state_path),
+            json.dumps(install_state, indent=2) + "\n",
+            mode=0o640,
+        )
 
     def build_manual_steps(self) -> tuple[str, ...]:
         return (
@@ -455,8 +551,11 @@ class HostBootstrapInstaller:
         )
 
     def _service_user_exists(self) -> bool:
+        return self.service_user_exists_checker(SERVICE_USER)
+
+    def _lookup_service_user(self, user_name: str) -> bool:
         try:
-            pwd.getpwnam(SERVICE_USER)
+            pwd.getpwnam(user_name)
         except KeyError:
             return False
         return True
@@ -486,6 +585,47 @@ class HostBootstrapInstaller:
         )
         return bool((completed.stdout or "").strip())
 
+    def _capture_conflicting_unit_state(self, unit_name: str) -> ConflictingUnitState:
+        if not self._unit_exists(unit_name):
+            return ConflictingUnitState(
+                existed=False,
+                enabled_before=False,
+                active_before=False,
+                masked_before=False,
+                changed_by_installer=False,
+            )
+
+        enabled_state = self._read_unit_enabled_state(unit_name)
+        active_state = self._read_unit_active_state(unit_name)
+        return ConflictingUnitState(
+            existed=True,
+            enabled_before=enabled_state in {"enabled", "enabled-runtime"},
+            active_before=active_state == "active",
+            masked_before=enabled_state == "masked",
+            changed_by_installer=False,
+        )
+
+    def _configure_conflicting_unit(self, unit_name: str, state: ConflictingUnitState) -> bool:
+        if not state.existed:
+            return False
+
+        changed_by_installer = False
+        if state.enabled_before or state.active_before:
+            self._run_optional(["systemctl", "disable", "--now", unit_name])
+            changed_by_installer = True
+        if not state.masked_before:
+            self._run_optional(["systemctl", "mask", unit_name])
+            changed_by_installer = True
+        return changed_by_installer
+
+    def _read_unit_enabled_state(self, unit_name: str) -> str:
+        completed = self._run(["systemctl", "is-enabled", unit_name], check=False)
+        return (completed.stdout or "").strip()
+
+    def _read_unit_active_state(self, unit_name: str) -> str:
+        completed = self._run(["systemctl", "is-active", unit_name], check=False)
+        return (completed.stdout or "").strip()
+
     def _stage(self, host_path: Path) -> Path:
         relative = host_path.relative_to("/")
         return self.install_root / relative
@@ -496,8 +636,11 @@ class HostBootstrapInstaller:
         path.chmod(mode)
 
     def _next_backup_path(self, config_path: Path) -> Path:
-        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
+        timestamp = self.now_provider().astimezone(timezone.utc).strftime("%Y%m%d%H%M%S")
         return config_path.with_name(f"{config_path.name}.bak.{timestamp}")
+
+    def _format_timestamp(self, value: datetime) -> str:
+        return value.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
     def _run(
         self,

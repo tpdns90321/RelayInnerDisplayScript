@@ -6,7 +6,7 @@ The target outcome is a small appliance-like runtime that takes one VM managed b
 
 ## Status
 
-This repository now includes all six runtime slices for the MVP.
+This repository now includes Specs 10 through 16 of the MVP plan.
 
 - The MVP architecture and behavior are defined in `./specs`.
 - Spec 10 now has a Python implementation for config loading, daemon/session IPC, local Proxmox command wrappers, SPICE `.vv` generation, and reconnect state handling.
@@ -15,7 +15,34 @@ This repository now includes all six runtime slices for the MVP.
 - Spec 13 now extends the daemon with host power-button validation, evdev button capture, debounced guest start/shutdown forwarding, and runtime button-action tracking.
 - Spec 14 now adds the host-direct bootstrap layer: a checked-in `install.sh`, sample config, setup guide, logind override rendering, and managed systemd unit installation for the daemon, kiosk, and seat runtime.
 - Spec 15 now hardens the appliance integration layer with the final MVP state-file contract, runtime dependency validation, repeated Proxmox-failure degradation, subsystem-scoped journald logging, and systemd restart-loop thresholds.
+- Spec 16 now turns the root README into the first-run install entrypoint and persists `/var/lib/relayinner-display/install-state.json` so later uninstall or upgrade work can see what the installer changed.
 - The current design still assumes direct installation on a Proxmox host, not an LXC container.
+
+## Quickstart
+
+Use this install path only on a Proxmox VE host with `systemd`, a directly attached monitor, and one target guest that exposes a SPICE display.
+
+1. Clone or copy this repository onto the Proxmox host and `cd` into the checkout.
+2. Run `sudo ./install.sh`.
+3. Edit `/etc/relayinner-display/config.toml` and set at least:
+   - `[target].vmid`
+   - `[target].node_name`
+   - `[display].output_name` if you want to pin a specific connector name
+   - `[input].power_button_event` if the default evdev path does not match the host
+4. Restart the relay services after editing the config:
+
+```sh
+systemctl restart relayinner-display-seatd.service relayinner-displayd.service relayinner-display-kiosk.service
+```
+
+5. Reboot once and verify that `tty1` returns directly into the kiosk session. For first-run checks, confirm the services are up and that `/var/lib/relayinner-display/install-state.json` exists:
+
+```sh
+systemctl status relayinner-display-seatd.service relayinner-displayd.service relayinner-display-kiosk.service
+sudo cat /var/lib/relayinner-display/install-state.json
+```
+
+For the full operator procedure, package assumptions, managed paths, troubleshooting commands, and installer flag details, see [`./docs/proxmox-host-setup.md`](./docs/proxmox-host-setup.md).
 
 ## MVP Goals
 
@@ -53,8 +80,8 @@ Current implementation coverage:
 - `relayinner_display.input` validates host `logind` power-key policy and captures `KEY_POWER` presses from one evdev node.
 - `relayinner_display.session` supervises `remote-viewer`, tracks waiting/degraded/display-sleeping session state, applies `wlopm`-style display-power actions from the Wayland session context, and emits subsystem-scoped session, console, and display logs.
 - `relayinner_display.kiosk` provides the Cage session entrypoint and the canonical `seatd-launch -- cage -- ...` command shape from Spec 11.
-- `relayinner_display.bootstrap` renders the sample config, systemd units, logind override, and the Spec 15 `StartLimitIntervalSec=120` / `StartLimitBurst=5` restart-loop policy.
-- `tests/` now cover config parsing, IPC validation, Proxmox command handling, reconnect logic, daemon DPMS debounce behavior, Spec 15 state persistence, runtime dependency degradation, restart-threshold rendering, session supervision, logind policy parsing, power-button handling, display-power handling, and kiosk entrypoint wiring.
+- `relayinner_display.bootstrap` renders the sample config, systemd units, logind override, the Spec 15 `StartLimitIntervalSec=120` / `StartLimitBurst=5` restart-loop policy, and the Spec 16 install-state record under `/var/lib/relayinner-display/install-state.json`.
+- `tests/` now cover config parsing, IPC validation, Proxmox command handling, reconnect logic, daemon DPMS debounce behavior, Spec 15 state persistence, runtime dependency degradation, restart-threshold rendering, installer install-state persistence, session supervision, logind policy parsing, power-button handling, display-power handling, and kiosk entrypoint wiring.
 
 Operationally, the appliance is expected to move through a small state machine:
 
@@ -105,6 +132,7 @@ The current implementation now manages:
 - systemd service units for daemon, kiosk session, and seat handling
 - a non-login runtime user through `install.sh`
 - a `logind` override for host power-button behavior
+- an install-state record under `/var/lib/relayinner-display/install-state.json`
 - runtime state under `/run/relayinner-display/`
 - subsystem-scoped journald observability for `proxmox`, `session`, `console`, `display`, and `input`
 - restart-loop thresholds of 5 failures within 2 minutes for the managed systemd units
@@ -125,10 +153,10 @@ The current implementation now manages:
 └── tasks/
 ```
 
-- `relayinner_display/` holds the current Python runtime for Specs 10 through 14.
-- `config.example.toml` is the host bootstrap sample config installed by Spec 14.
+- `relayinner_display/` holds the current Python runtime for Specs 10 through 16.
+- `config.example.toml` is the host bootstrap sample config installed by Specs 14 and 16.
 - `docs/` holds operator-facing setup documentation for the host-direct install path.
-- `install.sh` is the idempotent host bootstrap entrypoint from Spec 14.
+- `install.sh` is the idempotent host bootstrap entrypoint from Specs 14 and 16.
 - `specs/` holds the MVP specification set.
 - `tests/` holds unit tests for the current runtime slice.
 - `tasks/` is reserved for task/worktree-oriented workflow.
