@@ -12,6 +12,7 @@ import socket
 import time
 
 from .config import AppConfig, load_config
+from .input import EvdevPowerButtonSource, LogindPowerButtonPolicyChecker, PowerButtonError
 from .ipc import decode_message, encode_message, validate_session_message
 from .models import RuntimeState, SessionState, write_runtime_state
 from .proxmox import ProxmoxClient, ProxmoxCommandError
@@ -20,6 +21,8 @@ from .proxmox import ProxmoxClient, ProxmoxCommandError
 DEFAULT_CONFIG_PATH = Path("/etc/relayinner-display/config.toml")
 SESSION_USER = "relayinner-display"
 SESSION_GROUP = "relayinner-display"
+RUNNING_VM_STATES = {"running", "paused"}
+STOPPED_VM_STATES = {"stopped", "shutdown"}
 
 
 def utcnow() -> datetime:
@@ -127,6 +130,8 @@ class DisplayDaemon:
         config: AppConfig,
         proxmox: ProxmoxClient,
         logger: logging.Logger | None = None,
+        power_button_source: Any | None = None,
+        host_policy_checker: Any | None = None,
     ) -> None:
         self.config = config
         self.proxmox = proxmox
@@ -137,6 +142,11 @@ class DisplayDaemon:
         self.console_pid: int | None = None
         self.next_reconnect_at: datetime | None = None
         self.current_reconnect_delay_ms = config.policy.reconnect_initial_ms
+        self.power_button_source = power_button_source
+        self.host_policy_checker = host_policy_checker
+        self.startup_error: str | None = None
+        self.last_power_button_accepted_at: datetime | None = None
+        self.power_button_action_started_at: datetime | None = None
 
     def prepare_runtime(self) -> None:
         self.config.runtime.run_dir.mkdir(parents=True, exist_ok=True)
@@ -153,6 +163,14 @@ class DisplayDaemon:
 
     def start(self, now: datetime | None = None) -> None:
         self.state.node_name = self.proxmox.resolve_node_name(self.config.target.node_name)
+        try:
+            self._prepare_power_button_capture()
+        except PowerButtonError as exc:
+            self._set_startup_error(str(exc))
+            self._persist_state()
+            self.logger.error("Daemon started in degraded mode: %s", exc)
+            return
+
         self._transition(SessionState.WAITING_FOR_SESSION)
         self._persist_state()
         self.logger.info("Daemon started for VM %s on node %s", self.state.vmid, self.state.node_name)
@@ -161,7 +179,10 @@ class DisplayDaemon:
         self.session_ready = False
         self.console_running = False
         self.console_pid = None
-        self._transition(SessionState.WAITING_FOR_SESSION)
+        if self.startup_error is not None:
+            self._transition(SessionState.DEGRADED)
+        else:
+            self._transition(SessionState.WAITING_FOR_SESSION)
         self._persist_state()
         self.logger.warning("Session disconnected")
 
@@ -179,7 +200,11 @@ class DisplayDaemon:
             self.console_running = False
             self.console_pid = None
             self.logger.info("Session ready")
-            if self.state.vm_power_state == "running":
+            if self.startup_error is not None:
+                self._transition(SessionState.DEGRADED)
+                self._persist_state()
+                return [{"type": "show_waiting", "reason": "degraded"}]
+            if self.state.vm_power_state in RUNNING_VM_STATES:
                 self._transition(SessionState.RECONNECTING_CONSOLE)
                 self._persist_state()
                 return [{"type": "show_waiting", "reason": "reconnecting"}]
@@ -200,6 +225,8 @@ class DisplayDaemon:
             return []
 
         if message_type == "display_power_applied":
+            self.state.display_power_applied = str(payload["state"])
+            self._persist_state()
             self.logger.info("Display power applied in session: %s", payload["state"])
             return []
 
@@ -211,7 +238,7 @@ class DisplayDaemon:
             self.state.last_error = (
                 f"remote-viewer exited unexpectedly (code={exit_code}, signal={exit_signal})"
             )
-            if self.state.vm_power_state == "running":
+            if self.state.vm_power_state in RUNNING_VM_STATES:
                 self._schedule_reconnect(timestamp)
                 self._transition(SessionState.RECONNECTING_CONSOLE)
                 self._persist_state()
@@ -235,16 +262,41 @@ class DisplayDaemon:
 
     def tick(self, now: datetime | None = None) -> list[dict[str, object]]:
         timestamp = now or utcnow()
-        if not self.session_ready:
-            return []
+        actions = self._poll_power_button_source(timestamp)
+
+        if self.startup_error is not None:
+            return actions
+
+        if not self.session_ready and not self.state.power_button_action_in_flight:
+            return actions
 
         try:
             vm_status = self.proxmox.get_vm_status(self.config.target.vmid)
         except ProxmoxCommandError as exc:
-            return self._enter_degraded(str(exc))
+            if not self.session_ready:
+                self.state.last_error = str(exc)
+                self._persist_state()
+                self.logger.error("Unable to poll VM status while tracking power-button action: %s", exc)
+                return actions
+            return actions + self._enter_degraded(str(exc))
 
         self.state.vm_power_state = vm_status
-        if vm_status != "running":
+        self._refresh_power_button_action(timestamp, vm_status)
+
+        if not self.session_ready:
+            self._persist_state()
+            return actions
+
+        return actions + self._tick_session_state(timestamp, vm_status)
+
+    def close(self) -> None:
+        if self.power_button_source is not None:
+            close = getattr(self.power_button_source, "close", None)
+            if callable(close):
+                close()
+
+    def _tick_session_state(self, timestamp: datetime, vm_status: str) -> list[dict[str, object]]:
+        if vm_status not in RUNNING_VM_STATES:
             self.next_reconnect_at = None
             self.current_reconnect_delay_ms = self.config.policy.reconnect_initial_ms
             self.state.last_error = None
@@ -294,6 +346,179 @@ class DisplayDaemon:
         self._persist_state()
         self.logger.info("Prepared SPICE config for VM %s", self.state.vmid)
         return [{"type": "connect_spice", "vv_path": str(self.config.runtime.spice_vv_path)}]
+
+    def _prepare_power_button_capture(self) -> None:
+        if not self.config.input.forward_power_button:
+            return
+
+        checker = self.host_policy_checker or LogindPowerButtonPolicyChecker()
+        source = self.power_button_source or EvdevPowerButtonSource(
+            self.config.input.power_button_event
+        )
+        checker.validate()
+        source.open()
+        self.host_policy_checker = checker
+        self.power_button_source = source
+        self.logger.info(
+            "Power-button forwarding enabled from %s",
+            self.config.input.power_button_event,
+        )
+
+    def _poll_power_button_source(self, timestamp: datetime) -> list[dict[str, object]]:
+        if not self.config.input.forward_power_button:
+            return []
+        if self.startup_error is not None or self.power_button_source is None:
+            return []
+
+        try:
+            press_count = int(self.power_button_source.poll_presses())
+        except (OSError, PowerButtonError) as exc:
+            self._set_startup_error(f"Power-button device read failed: {exc}")
+            self._persist_state()
+            self.logger.error("Power-button forwarding disabled after read failure: %s", exc)
+            return []
+
+        for _ in range(press_count):
+            self._handle_power_button_press(timestamp)
+        return []
+
+    def _handle_power_button_press(self, timestamp: datetime) -> None:
+        try:
+            vm_status = self.proxmox.get_vm_status(self.config.target.vmid)
+        except ProxmoxCommandError as exc:
+            self.state.last_power_button_result = "status_failed"
+            self.state.last_error = str(exc)
+            self._persist_state()
+            self.logger.error("Ignored power-button press because VM status could not be read: %s", exc)
+            return
+
+        self.state.vm_power_state = vm_status
+        self._refresh_power_button_action(timestamp, vm_status)
+        if self.state.power_button_action_in_flight:
+            self.state.last_power_button_result = "ignored_in_flight"
+            self._persist_state()
+            self.logger.info(
+                "Ignored power-button press while action=%s remains in flight",
+                self.state.last_power_button_action,
+            )
+            return
+
+        if self._within_power_button_debounce(timestamp):
+            self.state.last_power_button_result = "ignored_debounced"
+            self._persist_state()
+            self.logger.info(
+                "Ignored power-button press within debounce window (%sms)",
+                self.config.input.debounce_ms,
+            )
+            return
+
+        if vm_status in STOPPED_VM_STATES:
+            action = self.config.policy.power_button_action_when_stopped
+            command = lambda: self.proxmox.start_vm(self.config.target.vmid)
+        elif vm_status in RUNNING_VM_STATES:
+            action = self.config.policy.power_button_action_when_running
+            command = lambda: self.proxmox.shutdown_vm(
+                self.config.target.vmid,
+                self.config.policy.shutdown_timeout_s,
+            )
+        else:
+            self.state.last_power_button_result = "ignored_non_actionable"
+            self._persist_state()
+            self.logger.info(
+                "Ignored power-button press for non-actionable VM state=%s",
+                vm_status,
+            )
+            return
+
+        try:
+            command()
+        except ProxmoxCommandError as exc:
+            self.last_power_button_accepted_at = timestamp
+            self.state.mark_power_button_press(timestamp, action, "failed")
+            self.state.last_error = str(exc)
+            self._persist_state()
+            self.logger.error(
+                "Power-button action failed: action=%s vmid=%s error=%s",
+                action,
+                self.state.vmid,
+                exc,
+            )
+            return
+
+        self.last_power_button_accepted_at = timestamp
+        self.power_button_action_started_at = timestamp
+        self.state.mark_power_button_press(timestamp, action, "submitted")
+        self.state.last_error = None
+        self._persist_state()
+        self.logger.info(
+            "Accepted power-button press: action=%s vmid=%s vm_state=%s",
+            action,
+            self.state.vmid,
+            vm_status,
+        )
+
+    def _refresh_power_button_action(self, timestamp: datetime, vm_status: str) -> None:
+        if not self.state.power_button_action_in_flight:
+            return
+
+        action = self.state.last_power_button_action
+        if action == "start":
+            if vm_status in RUNNING_VM_STATES:
+                self.state.power_button_action_in_flight = False
+                self.state.last_power_button_result = "completed"
+                self.power_button_action_started_at = None
+                self.logger.info("Observed completion of in-flight power-button start action")
+                return
+            if (
+                self.power_button_action_started_at is not None
+                and self._elapsed_ms(self.power_button_action_started_at, timestamp)
+                >= self.config.input.debounce_ms
+            ):
+                self.state.power_button_action_in_flight = False
+                self.state.last_power_button_result = "stalled"
+                self.power_button_action_started_at = None
+                self.logger.warning("In-flight power-button start action stalled in state=%s", vm_status)
+                return
+
+        if action == "shutdown":
+            if vm_status in STOPPED_VM_STATES:
+                self.state.power_button_action_in_flight = False
+                self.state.last_power_button_result = "completed"
+                self.power_button_action_started_at = None
+                self.logger.info("Observed completion of in-flight power-button shutdown action")
+                return
+            if (
+                self.power_button_action_started_at is not None
+                and self._elapsed_ms(self.power_button_action_started_at, timestamp)
+                >= self.config.policy.shutdown_timeout_s * 1000
+                and vm_status not in STOPPED_VM_STATES
+            ):
+                self.state.power_button_action_in_flight = False
+                self.state.last_power_button_result = "timed_out"
+                self.power_button_action_started_at = None
+                self.logger.warning(
+                    "In-flight power-button shutdown action timed out in state=%s",
+                    vm_status,
+                )
+
+    def _set_startup_error(self, reason: str) -> None:
+        self.startup_error = reason
+        self.state.last_error = reason
+        self.state.power_button_action_in_flight = False
+        self.power_button_action_started_at = None
+        self._transition(SessionState.DEGRADED)
+        self.close()
+
+    def _within_power_button_debounce(self, timestamp: datetime) -> bool:
+        if self.last_power_button_accepted_at is None:
+            return False
+        return (
+            self._elapsed_ms(self.last_power_button_accepted_at, timestamp)
+            < self.config.input.debounce_ms
+        )
+
+    def _elapsed_ms(self, start: datetime, end: datetime) -> int:
+        return int((end - start).total_seconds() * 1000)
 
     def _enter_degraded(self, reason: str) -> list[dict[str, object]]:
         had_console = self.console_running or self.console_pid is not None
@@ -395,6 +620,7 @@ def run(config_path: Path) -> int:
 
             time.sleep(poll_interval_s)
     finally:
+        daemon.close()
         socket_server.close()
 
 

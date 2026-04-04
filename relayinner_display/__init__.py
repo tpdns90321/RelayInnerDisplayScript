@@ -3,6 +3,7 @@
 __all__ = [
     "config",
     "daemon",
+    "input",
     "ipc",
     "kiosk",
     "models",

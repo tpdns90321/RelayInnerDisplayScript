@@ -4,7 +4,14 @@ from pathlib import Path
 import subprocess
 import unittest
 
-from relayinner_display.config import AppConfig, PolicyConfig, RuntimeConfig, TargetConfig
+from relayinner_display.config import (
+    AppConfig,
+    DisplayConfig,
+    InputConfig,
+    PolicyConfig,
+    RuntimeConfig,
+    TargetConfig,
+)
 from relayinner_display.session import SessionSupervisor
 
 
@@ -153,11 +160,26 @@ def build_config() -> AppConfig:
             spice_vv_path=run_dir / "current.vv",
             log_namespace="relayinner-display",
         ),
+        display=DisplayConfig(
+            output_name="",
+            power_helper="wlopm",
+        ),
+        input=InputConfig(
+            power_button_event=Path("/dev/input/by-path/platform-i8042-serio-0-event-power"),
+            forward_power_button=False,
+            debounce_ms=2000,
+        ),
         policy=PolicyConfig(
             poll_interval_ms=2000,
             reconnect_initial_ms=1000,
             reconnect_max_ms=15000,
             command_timeout_s=10,
+            dpms_policy="vm-power",
+            dpms_off_delay_ms=5000,
+            power_state_stabilize_ms=3000,
+            power_button_action_when_running="shutdown",
+            power_button_action_when_stopped="start",
+            shutdown_timeout_s=90,
         ),
     )
 

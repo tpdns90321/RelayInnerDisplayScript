@@ -74,6 +74,24 @@ class ProxmoxTests(unittest.TestCase):
         with self.assertRaises(ProxmoxCommandError):
             client.get_vm_status(101)
 
+    def test_power_button_vm_actions_use_expected_commands(self) -> None:
+        commands: list[list[str]] = []
+
+        def runner(command: list[str], timeout_s: int) -> CommandResult:
+            commands.append(command)
+            return CommandResult(
+                args=tuple(command),
+                returncode=0,
+                stdout="",
+                stderr="",
+            )
+
+        client = ProxmoxClient(timeout_s=10, runner=runner)
+        client.start_vm(101)
+        client.shutdown_vm(101, timeout_s=90)
+
+        self.assertEqual(commands, [["qm", "start", "101"], ["qm", "shutdown", "101", "--timeout", "90"]])
+
 
 if __name__ == "__main__":
     unittest.main()

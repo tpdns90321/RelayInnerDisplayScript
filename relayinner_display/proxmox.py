@@ -89,6 +89,15 @@ class ProxmoxClient:
             raise ProxmoxCommandError(f"qm status returned unexpected output for VM {vmid}")
         return match.group(1)
 
+    def start_vm(self, vmid: int) -> None:
+        self._run(["qm", "start", str(vmid)])
+
+    def shutdown_vm(self, vmid: int, timeout_s: int) -> None:
+        command = ["qm", "shutdown", str(vmid)]
+        if timeout_s > 0:
+            command.extend(["--timeout", str(timeout_s)])
+        self._run(command)
+
     def request_spice_config(
         self,
         node_name: str,
