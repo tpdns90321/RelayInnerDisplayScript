@@ -6,7 +6,7 @@ The target outcome is a small appliance-like runtime that takes one VM managed b
 
 ## Status
 
-This repository now includes Specs 10 through 16 of the MVP plan.
+This repository now includes Specs 10 through 17 of the MVP plan.
 
 - The MVP architecture and behavior are defined in `./specs`.
 - Spec 10 now has a Python implementation for config loading, daemon/session IPC, local Proxmox command wrappers, SPICE `.vv` generation, and reconnect state handling.
@@ -16,6 +16,7 @@ This repository now includes Specs 10 through 16 of the MVP plan.
 - Spec 14 now adds the host-direct bootstrap layer: a checked-in `install.sh`, sample config, setup guide, logind override rendering, and managed systemd unit installation for the daemon, kiosk, and seat runtime.
 - Spec 15 now hardens the appliance integration layer with the final MVP state-file contract, runtime dependency validation, repeated Proxmox-failure degradation, subsystem-scoped journald logging, and systemd restart-loop thresholds.
 - Spec 16 now turns the root README into the first-run install entrypoint and persists `/var/lib/relayinner-display/install-state.json` so later uninstall or upgrade work can see what the installer changed.
+- Spec 17 now adds a root-owned `uninstall.sh`, install-state-aware host restoration, default config preservation, and an explicit purge path for full relay cleanup.
 - The current design still assumes direct installation on a Proxmox host, not an LXC container.
 
 ## Quickstart
@@ -43,6 +44,24 @@ sudo cat /var/lib/relayinner-display/install-state.json
 ```
 
 For the full operator procedure, package assumptions, managed paths, troubleshooting commands, and installer flag details, see [`./docs/proxmox-host-setup.md`](./docs/proxmox-host-setup.md).
+
+## Uninstall
+
+To remove the relay appliance and return the host to its normal local-login path, run:
+
+```sh
+sudo ./uninstall.sh
+```
+
+Default uninstall preserves `/etc/relayinner-display/config.toml`, stops and disables the relay services, removes relay-managed runtime assets and host overrides, and restores `getty@tty1.service`.
+
+For full cleanup, including `/etc/relayinner-display/config.toml` and `config.toml.bak.*` backups, run:
+
+```sh
+sudo ./uninstall.sh --purge-config
+```
+
+For the detailed removal contract, best-effort fallback behavior, and post-uninstall recovery checks, see [`./docs/proxmox-host-setup.md`](./docs/proxmox-host-setup.md).
 
 ## MVP Goals
 
@@ -80,8 +99,8 @@ Current implementation coverage:
 - `relayinner_display.input` validates host `logind` power-key policy and captures `KEY_POWER` presses from one evdev node.
 - `relayinner_display.session` supervises `remote-viewer`, tracks waiting/degraded/display-sleeping session state, applies `wlopm`-style display-power actions from the Wayland session context, and emits subsystem-scoped session, console, and display logs.
 - `relayinner_display.kiosk` provides the Cage session entrypoint and the canonical `seatd-launch -- cage -- ...` command shape from Spec 11.
-- `relayinner_display.bootstrap` renders the sample config, systemd units, logind override, the Spec 15 `StartLimitIntervalSec=120` / `StartLimitBurst=5` restart-loop policy, and the Spec 16 install-state record under `/var/lib/relayinner-display/install-state.json`.
-- `tests/` now cover config parsing, IPC validation, Proxmox command handling, reconnect logic, daemon DPMS debounce behavior, Spec 15 state persistence, runtime dependency degradation, restart-threshold rendering, installer install-state persistence, session supervision, logind policy parsing, power-button handling, display-power handling, and kiosk entrypoint wiring.
+- `relayinner_display.bootstrap` renders the sample config, systemd units, logind override, the Spec 15 `StartLimitIntervalSec=120` / `StartLimitBurst=5` restart-loop policy, the Spec 16 install-state record under `/var/lib/relayinner-display/install-state.json`, and the Spec 17 uninstall flow that restores `tty1` plus optional display-manager state conservatively.
+- `tests/` now cover config parsing, IPC validation, Proxmox command handling, reconnect logic, daemon DPMS debounce behavior, Spec 15 state persistence, runtime dependency degradation, restart-threshold rendering, install-state persistence, uninstall fallback and purge behavior, session supervision, logind policy parsing, power-button handling, display-power handling, and kiosk entrypoint wiring.
 
 Operationally, the appliance is expected to move through a small state machine:
 
@@ -147,6 +166,7 @@ The current implementation now manages:
 ├── config.example.toml
 ├── docs/
 ├── install.sh
+├── uninstall.sh
 ├── relayinner_display/
 ├── specs/
 ├── tests/
@@ -157,6 +177,7 @@ The current implementation now manages:
 - `config.example.toml` is the host bootstrap sample config installed by Specs 14 and 16.
 - `docs/` holds operator-facing setup documentation for the host-direct install path.
 - `install.sh` is the idempotent host bootstrap entrypoint from Specs 14 and 16.
+- `uninstall.sh` is the safe removal entrypoint from Spec 17.
 - `specs/` holds the MVP specification set.
 - `tests/` holds unit tests for the current runtime slice.
 - `tasks/` is reserved for task/worktree-oriented workflow.

@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import subprocess
+from typing import Callable
 import unittest
 
 from relayinner_display.bootstrap import (
@@ -13,6 +14,8 @@ from relayinner_display.bootstrap import (
     HostInstallPaths,
     REQUIRED_PACKAGES,
     REQUIRED_SERVICES,
+    RUNTIME_STATE_DIR,
+    SERVICE_USER,
     SYSTEMD_START_LIMIT_BURST,
     SYSTEMD_START_LIMIT_INTERVAL_SEC,
     build_installed_daemon_command,
@@ -80,10 +83,56 @@ class FakeRunner:
 
 
 class BootstrapTests(unittest.TestCase):
+    def stage_path(self, root: Path, host_path: Path) -> Path:
+        return root / host_path.relative_to("/")
+
     def read_install_state(self, root: Path) -> dict[str, object]:
-        install_state_path = root / "var/lib/relayinner-display/install-state.json"
+        install_state_path = self.stage_path(root, HostInstallPaths().install_state_path)
         with install_state_path.open(encoding="utf-8") as handle:
             return json.load(handle)
+
+    def write_install_state(self, root: Path, install_state: dict[str, object]) -> None:
+        install_state_path = self.stage_path(root, HostInstallPaths().install_state_path)
+        install_state_path.parent.mkdir(parents=True, exist_ok=True)
+        install_state_path.write_text(json.dumps(install_state, indent=2) + "\n", encoding="utf-8")
+
+    def make_installer(
+        self,
+        *,
+        root: Path,
+        runner: FakeRunner,
+        output: Callable[[str], None] | None = None,
+        service_user_exists: bool,
+    ) -> HostBootstrapInstaller:
+        repo_root = Path(__file__).resolve().parents[1]
+        return HostBootstrapInstaller(
+            repo_root=repo_root,
+            install_root=root,
+            command_runner=runner,
+            output=output,
+            pveversion_finder=lambda _: "/usr/bin/pveversion",
+            systemd_runtime_path=root / "run/systemd/system",
+            now_provider=lambda: FIXED_INSTALL_TIME,
+            service_user_exists_checker=lambda _: service_user_exists,
+        )
+
+    def install_fixture(
+        self,
+        *,
+        root: Path,
+        service_user_exists: bool,
+    ) -> None:
+        installer = self.make_installer(
+            root=root,
+            runner=FakeRunner(),
+            output=lambda _: None,
+            service_user_exists=service_user_exists,
+        )
+        installer.install(
+            skip_host_validation=True,
+            skip_package_install=True,
+            replace_config=False,
+        )
 
     def test_render_sample_config_matches_checked_in_example_and_is_valid(self) -> None:
         repo_root = Path(__file__).resolve().parents[1]
@@ -308,6 +357,172 @@ class BootstrapTests(unittest.TestCase):
                     "changed_by_installer": False,
                 },
             )
+
+    def test_uninstall_preserves_config_and_removes_runtime_when_install_state_present(self) -> None:
+        paths = HostInstallPaths()
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            self.install_fixture(root=root, service_user_exists=False)
+
+            runner = FakeRunner()
+            outputs: list[str] = []
+            installer = self.make_installer(
+                root=root,
+                runner=runner,
+                output=outputs.append,
+                service_user_exists=True,
+            )
+
+            installer.uninstall()
+
+            self.assertTrue(self.stage_path(root, paths.config_path).is_file())
+            self.assertFalse(self.stage_path(root, paths.lib_dir).exists())
+            self.assertFalse(self.stage_path(root, paths.share_dir).exists())
+            self.assertFalse(self.stage_path(root, paths.logind_override_path).exists())
+            self.assertFalse(self.stage_path(root, paths.install_state_path).exists())
+            self.assertFalse(self.stage_path(root, paths.service_home).exists())
+            self.assertFalse(self.stage_path(root, RUNTIME_STATE_DIR).exists())
+            for unit_path in paths.systemd_unit_paths:
+                self.assertFalse(self.stage_path(root, unit_path).exists())
+
+            self.assertIn(["systemctl", "unmask", "getty@tty1.service"], runner.commands)
+            self.assertIn(["systemctl", "enable", "getty@tty1.service"], runner.commands)
+            self.assertIn(["systemctl", "start", "getty@tty1.service"], runner.commands)
+            self.assertIn(["userdel", SERVICE_USER], runner.commands)
+            self.assertTrue(any("Preserving operator config" in message for message in outputs))
+
+    def test_uninstall_leaves_existing_service_user_and_home_intact(self) -> None:
+        paths = HostInstallPaths()
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            self.install_fixture(root=root, service_user_exists=True)
+
+            runner = FakeRunner()
+            installer = self.make_installer(
+                root=root,
+                runner=runner,
+                output=lambda _: None,
+                service_user_exists=True,
+            )
+
+            installer.uninstall()
+
+            self.assertTrue(self.stage_path(root, paths.service_home).is_dir())
+            self.assertFalse(self.stage_path(root, paths.install_state_path).exists())
+            self.assertNotIn(["userdel", SERVICE_USER], runner.commands)
+
+    def test_uninstall_purge_removes_config_backups_and_empty_config_dir(self) -> None:
+        paths = HostInstallPaths()
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            self.install_fixture(root=root, service_user_exists=True)
+
+            config_dir = self.stage_path(root, paths.config_dir)
+            (config_dir / "config.toml.bak.20260404120001").write_text("backup-1\n", encoding="utf-8")
+            (config_dir / "config.toml.bak.20260404120002").write_text("backup-2\n", encoding="utf-8")
+
+            installer = self.make_installer(
+                root=root,
+                runner=FakeRunner(),
+                output=lambda _: None,
+                service_user_exists=True,
+            )
+
+            installer.uninstall(purge_config=True)
+
+            self.assertFalse(self.stage_path(root, paths.config_path).exists())
+            self.assertFalse(config_dir.exists())
+
+    def test_uninstall_best_effort_warns_when_install_state_is_missing(self) -> None:
+        paths = HostInstallPaths()
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            self.install_fixture(root=root, service_user_exists=True)
+            self.stage_path(root, paths.install_state_path).unlink()
+
+            outputs: list[str] = []
+            runner = FakeRunner()
+            installer = self.make_installer(
+                root=root,
+                runner=runner,
+                output=outputs.append,
+                service_user_exists=True,
+            )
+
+            installer.uninstall()
+
+            self.assertTrue(any(message.startswith("WARNING: install-state missing") for message in outputs))
+            self.assertTrue(self.stage_path(root, paths.config_path).is_file())
+            self.assertTrue(self.stage_path(root, paths.service_home).is_dir())
+            self.assertNotIn(["userdel", SERVICE_USER], runner.commands)
+            self.assertIn(["systemctl", "enable", "getty@tty1.service"], runner.commands)
+            self.assertIn(["systemctl", "start", "getty@tty1.service"], runner.commands)
+
+    def test_uninstall_restores_getty_without_enabling_when_it_was_previously_disabled(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            self.install_fixture(root=root, service_user_exists=True)
+            install_state = self.read_install_state(root)
+            install_state["conflicting_units"]["getty@tty1.service"] = {
+                "existed": True,
+                "enabled_before": False,
+                "active_before": False,
+                "masked_before": False,
+                "changed_by_installer": True,
+            }
+            self.write_install_state(root, install_state)
+
+            runner = FakeRunner()
+            installer = self.make_installer(
+                root=root,
+                runner=runner,
+                output=lambda _: None,
+                service_user_exists=True,
+            )
+
+            installer.uninstall()
+
+            self.assertIn(["systemctl", "unmask", "getty@tty1.service"], runner.commands)
+            self.assertIn(["systemctl", "start", "getty@tty1.service"], runner.commands)
+            self.assertNotIn(["systemctl", "enable", "getty@tty1.service"], runner.commands)
+
+    def test_uninstall_restores_display_manager_only_when_install_state_proves_it_changed(self) -> None:
+        for changed_by_installer in (False, True):
+            with self.subTest(changed_by_installer=changed_by_installer):
+                with TemporaryDirectory() as temp_dir:
+                    root = Path(temp_dir)
+                    self.install_fixture(root=root, service_user_exists=True)
+                    install_state = self.read_install_state(root)
+                    install_state["conflicting_units"]["display-manager.service"] = {
+                        "existed": True,
+                        "enabled_before": True,
+                        "active_before": True,
+                        "masked_before": False,
+                        "changed_by_installer": changed_by_installer,
+                    }
+                    self.write_install_state(root, install_state)
+
+                    runner = FakeRunner()
+                    installer = self.make_installer(
+                        root=root,
+                        runner=runner,
+                        output=lambda _: None,
+                        service_user_exists=True,
+                    )
+
+                    installer.uninstall()
+
+                    display_manager_commands = [
+                        ["systemctl", "unmask", "display-manager.service"],
+                        ["systemctl", "enable", "display-manager.service"],
+                        ["systemctl", "start", "display-manager.service"],
+                    ]
+                    if changed_by_installer:
+                        for command in display_manager_commands:
+                            self.assertIn(command, runner.commands)
+                    else:
+                        for command in display_manager_commands:
+                            self.assertNotIn(command, runner.commands)
 
     def test_manual_steps_keep_vmid_edit_reminder(self) -> None:
         installer = HostBootstrapInstaller(

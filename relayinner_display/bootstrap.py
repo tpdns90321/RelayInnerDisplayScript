@@ -43,6 +43,7 @@ DEFAULT_PATH_ENV = "/usr/local/lib/relayinner-display:/usr/local/sbin:/usr/local
 SYSTEMD_START_LIMIT_INTERVAL_SEC = 120
 SYSTEMD_START_LIMIT_BURST = 5
 INSTALL_STATE_SCHEMA_VERSION = 1
+RUNTIME_STATE_DIR = Path("/run/relayinner-display")
 
 
 class BootstrapError(RuntimeError):
@@ -129,6 +130,21 @@ class ConflictingUnitState:
     active_before: bool
     masked_before: bool
     changed_by_installer: bool
+
+
+@dataclass(frozen=True)
+class UninstallState:
+    install_state_present: bool
+    lib_dir: Path
+    share_dir: Path
+    config_dir: Path
+    config_path: Path
+    logind_override_path: Path
+    service_home: Path
+    systemd_unit_paths: tuple[Path, ...]
+    service_user_created: bool
+    getty_state: ConflictingUnitState | None
+    display_manager_state: ConflictingUnitState | None
 
 
 CommandRunner = Callable[..., subprocess.CompletedProcess[str]]
@@ -363,6 +379,34 @@ class HostBootstrapInstaller:
                 "Host validation failed: /run/systemd/system is missing; a systemd-based host is required"
             )
 
+    def uninstall(self, *, purge_config: bool = False) -> None:
+        self._require_root()
+        self._verify_repo_layout()
+        uninstall_state = self._load_uninstall_state()
+
+        if not uninstall_state.install_state_present:
+            self.output(
+                f"WARNING: install-state missing at {self.paths.install_state_path}; using best-effort uninstall with reduced restore precision"
+            )
+
+        self.stop_services()
+        self.disable_services()
+        self.remove_service_units(uninstall_state.systemd_unit_paths)
+        self.remove_logind_override(uninstall_state.logind_override_path)
+        self.daemon_reload()
+        self.restore_getty(uninstall_state.getty_state)
+        self.restore_display_manager(uninstall_state.display_manager_state)
+        self.remove_runtime_tree(uninstall_state.lib_dir)
+        self.remove_shared_assets(uninstall_state.share_dir)
+        self.remove_runtime_state_dir()
+        self.remove_service_user(uninstall_state)
+        if purge_config:
+            self.purge_config(uninstall_state.config_path, uninstall_state.config_dir)
+        else:
+            self.output(f"Preserving operator config at {uninstall_state.config_path}")
+        self.remove_install_state()
+        self.remove_service_home(uninstall_state)
+
     def install_packages(self, *, skip_package_install: bool) -> None:
         if skip_package_install:
             self.output("Skipping apt package install (--skip-package-install)")
@@ -497,6 +541,16 @@ class HostBootstrapInstaller:
         self.output("Enabling relay services")
         self._run(["systemctl", "enable", *REQUIRED_SERVICES])
 
+    def stop_services(self) -> None:
+        self.output("Stopping relay services")
+        for service_name in REQUIRED_SERVICES:
+            self._run_optional(["systemctl", "stop", service_name])
+
+    def disable_services(self) -> None:
+        self.output("Disabling relay services")
+        for service_name in REQUIRED_SERVICES:
+            self._run_optional(["systemctl", "disable", service_name])
+
     def write_install_state(
         self,
         *,
@@ -626,9 +680,183 @@ class HostBootstrapInstaller:
         completed = self._run(["systemctl", "is-active", unit_name], check=False)
         return (completed.stdout or "").strip()
 
+    def _load_uninstall_state(self) -> UninstallState:
+        install_state_path = self._stage(self.paths.install_state_path)
+        if not install_state_path.exists():
+            return UninstallState(
+                install_state_present=False,
+                lib_dir=self.paths.lib_dir,
+                share_dir=self.paths.share_dir,
+                config_dir=self.paths.config_dir,
+                config_path=self.paths.config_path,
+                logind_override_path=self.paths.logind_override_path,
+                service_home=self.paths.service_home,
+                systemd_unit_paths=self.paths.systemd_unit_paths,
+                service_user_created=False,
+                getty_state=None,
+                display_manager_state=None,
+            )
+
+        try:
+            install_state = json.loads(install_state_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            raise BootstrapError(
+                f"Install-state file {self.paths.install_state_path} is unreadable: {exc.msg}"
+            ) from exc
+
+        managed_paths = install_state.get("managed_paths", {})
+        conflicting_units = install_state.get("conflicting_units", {})
+        service_user = install_state.get("service_user", {})
+
+        return UninstallState(
+            install_state_present=True,
+            lib_dir=self._path_from_state(managed_paths, "lib_dir", self.paths.lib_dir),
+            share_dir=self._path_from_state(managed_paths, "share_dir", self.paths.share_dir),
+            config_dir=self._path_from_state(managed_paths, "config_dir", self.paths.config_dir),
+            config_path=self._path_from_state(managed_paths, "config_path", self.paths.config_path),
+            logind_override_path=self._path_from_state(
+                managed_paths,
+                "logind_override_path",
+                self.paths.logind_override_path,
+            ),
+            service_home=self._path_from_state(managed_paths, "service_home", self.paths.service_home),
+            systemd_unit_paths=self._systemd_unit_paths_from_state(managed_paths.get("systemd_units")),
+            service_user_created=bool(service_user.get("created_by_installer", False)),
+            getty_state=self._conflicting_unit_state_from_state(conflicting_units.get("getty@tty1.service")),
+            display_manager_state=self._conflicting_unit_state_from_state(
+                conflicting_units.get("display-manager.service")
+            ),
+        )
+
+    def remove_service_units(self, unit_paths: Sequence[Path]) -> None:
+        self.output("Removing relay systemd unit files")
+        for unit_path in unit_paths:
+            self._remove_file(unit_path)
+
+    def remove_logind_override(self, logind_override_path: Path) -> None:
+        self.output("Removing relay logind override")
+        self._remove_file(logind_override_path)
+
+    def restore_getty(self, state: ConflictingUnitState | None) -> None:
+        self.output("Restoring getty@tty1.service")
+        self._run_optional(["systemctl", "unmask", "getty@tty1.service"])
+        if state is None or state.enabled_before:
+            self._run_optional(["systemctl", "enable", "getty@tty1.service"])
+        self._run_optional(["systemctl", "start", "getty@tty1.service"])
+
+    def restore_display_manager(self, state: ConflictingUnitState | None) -> None:
+        if state is None or not state.existed or not state.changed_by_installer:
+            return
+
+        self.output("Restoring display-manager.service from install-state")
+        if not state.masked_before:
+            self._run_optional(["systemctl", "unmask", "display-manager.service"])
+        if state.enabled_before:
+            self._run_optional(["systemctl", "enable", "display-manager.service"])
+        if state.active_before:
+            self._run_optional(["systemctl", "start", "display-manager.service"])
+
+    def remove_runtime_tree(self, lib_dir: Path) -> None:
+        self.output(f"Removing runtime package from {lib_dir}")
+        self._remove_tree(lib_dir)
+
+    def remove_shared_assets(self, share_dir: Path) -> None:
+        self.output(f"Removing shared assets from {share_dir}")
+        self._remove_tree(share_dir)
+
+    def remove_runtime_state_dir(self) -> None:
+        self.output(f"Removing runtime state under {RUNTIME_STATE_DIR}")
+        self._remove_tree(RUNTIME_STATE_DIR)
+
+    def remove_service_user(self, uninstall_state: UninstallState) -> None:
+        if not uninstall_state.install_state_present:
+            self.output(
+                f"Leaving service user {SERVICE_USER!r} and {uninstall_state.service_home} intact because installer authorship is unknown"
+            )
+            return
+        if not uninstall_state.service_user_created:
+            self.output(
+                f"Leaving service user {SERVICE_USER!r} and {uninstall_state.service_home} intact because the installer did not create them"
+            )
+            return
+        if not self._service_user_exists():
+            self.output(f"Service user {SERVICE_USER!r} is already absent")
+            return
+
+        self.output(f"Removing service user {SERVICE_USER!r}")
+        self._run(["userdel", SERVICE_USER])
+
+    def purge_config(self, config_path: Path, config_dir: Path) -> None:
+        self.output(f"Purging relay config artifacts from {config_dir}")
+        self._remove_file(config_path)
+
+        staged_config_dir = self._stage(config_dir)
+        if staged_config_dir.exists():
+            for backup_path in sorted(staged_config_dir.glob(f"{config_path.name}.bak.*")):
+                host_backup_path = config_dir / backup_path.name
+                self._remove_file(host_backup_path)
+
+        staged_config_dir = self._stage(config_dir)
+        if staged_config_dir.exists() and staged_config_dir.is_dir() and not any(staged_config_dir.iterdir()):
+            staged_config_dir.rmdir()
+            self.output(f"Removed empty config directory {config_dir}")
+
+    def remove_install_state(self) -> None:
+        self.output(f"Removing install-state record at {self.paths.install_state_path}")
+        self._remove_file(self.paths.install_state_path)
+
+    def remove_service_home(self, uninstall_state: UninstallState) -> None:
+        if not uninstall_state.install_state_present or not uninstall_state.service_user_created:
+            return
+        self.output(f"Removing service home {uninstall_state.service_home}")
+        self._remove_tree(uninstall_state.service_home)
+
+    def _path_from_state(self, mapping: object, key: str, default: Path) -> Path:
+        if not isinstance(mapping, dict):
+            return default
+        value = mapping.get(key)
+        if isinstance(value, str) and value.startswith("/"):
+            return Path(value)
+        return default
+
+    def _systemd_unit_paths_from_state(self, value: object) -> tuple[Path, ...]:
+        if not isinstance(value, list):
+            return self.paths.systemd_unit_paths
+
+        paths = tuple(Path(item) for item in value if isinstance(item, str) and item.startswith("/"))
+        return paths or self.paths.systemd_unit_paths
+
+    def _conflicting_unit_state_from_state(self, value: object) -> ConflictingUnitState | None:
+        if not isinstance(value, dict):
+            return None
+        return ConflictingUnitState(
+            existed=bool(value.get("existed", False)),
+            enabled_before=bool(value.get("enabled_before", False)),
+            active_before=bool(value.get("active_before", False)),
+            masked_before=bool(value.get("masked_before", False)),
+            changed_by_installer=bool(value.get("changed_by_installer", False)),
+        )
+
     def _stage(self, host_path: Path) -> Path:
         relative = host_path.relative_to("/")
         return self.install_root / relative
+
+    def _remove_file(self, host_path: Path) -> None:
+        staged_path = self._stage(host_path)
+        if not staged_path.exists() and not staged_path.is_symlink():
+            return
+        staged_path.unlink()
+        self.output(f"Removed {host_path}")
+
+    def _remove_tree(self, host_path: Path) -> None:
+        staged_path = self._stage(host_path)
+        if not staged_path.exists() and not staged_path.is_symlink():
+            return
+        if staged_path.is_dir() and not staged_path.is_symlink():
+            rmtree(staged_path)
+        else:
+            staged_path.unlink()
+        self.output(f"Removed {host_path}")
 
     def _write_text(self, path: Path, content: str, *, mode: int) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -674,6 +902,8 @@ def build_parser() -> ArgumentParser:
     parser = ArgumentParser(prog="relayinner-display-bootstrap")
     parser.add_argument("--repo-root", type=Path, required=True)
     parser.add_argument("--root", type=Path, default=DEFAULT_STAGE_ROOT)
+    parser.add_argument("--uninstall", action="store_true")
+    parser.add_argument("--purge-config", action="store_true")
     parser.add_argument("--skip-package-install", action="store_true")
     parser.add_argument("--replace-config", action="store_true")
     parser.add_argument("--skip-host-validation", action="store_true")
@@ -685,11 +915,22 @@ def main(argv: list[str] | None = None) -> int:
     installer = HostBootstrapInstaller(repo_root=args.repo_root, install_root=args.root)
 
     try:
-        installer.install(
-            skip_host_validation=args.skip_host_validation,
-            skip_package_install=args.skip_package_install,
-            replace_config=args.replace_config,
-        )
+        if args.uninstall:
+            if args.replace_config:
+                raise BootstrapError("--replace-config is only valid for install")
+            if args.skip_package_install:
+                raise BootstrapError("--skip-package-install is only valid for install")
+            if args.skip_host_validation:
+                raise BootstrapError("--skip-host-validation is only valid for install")
+            installer.uninstall(purge_config=args.purge_config)
+        else:
+            if args.purge_config:
+                raise BootstrapError("--purge-config is only valid for uninstall")
+            installer.install(
+                skip_host_validation=args.skip_host_validation,
+                skip_package_install=args.skip_package_install,
+                replace_config=args.replace_config,
+            )
     except BootstrapError as exc:
         print(f"relayinner-display-bootstrap: {exc}", file=sys.stderr)
         return 1

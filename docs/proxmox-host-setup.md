@@ -39,6 +39,57 @@ Installer flags:
 
 Successful installer runs also rewrite `/var/lib/relayinner-display/install-state.json`. Re-running without `--replace-config` preserves the current config and records `config_state.action=preserved`; re-running with `--replace-config` records `config_state.action=replaced` plus the backup path created during that run.
 
+## Uninstall
+
+Run uninstall from the repository checkout on the Proxmox host:
+
+```sh
+sudo ./uninstall.sh
+```
+
+Default uninstall performs these steps conservatively:
+
+- stops `relayinner-display-seatd.service`, `relayinner-display-kiosk.service`, and `relayinner-displayd.service`
+- disables the relay services so they do not come back on the next boot
+- removes `/usr/local/lib/relayinner-display/`, `/usr/local/share/relayinner-display/`, the relay unit files, and `/etc/systemd/logind.conf.d/relayinner-display.conf`
+- runs `systemctl daemon-reload`
+- restores `getty@tty1.service`
+- preserves `/etc/relayinner-display/config.toml`
+- deletes `/var/lib/relayinner-display/install-state.json` only after the restore and cleanup steps succeed
+
+If the installer-created service user is still recorded as `service_user.created_by_installer=true`, uninstall also removes the `relayinner-display` user and `/var/lib/relayinner-display/`. If the installer did not create that user, uninstall leaves the user and home directory intact.
+
+Use purge mode only when you want the relay config removed too:
+
+```sh
+sudo ./uninstall.sh --purge-config
+```
+
+`--purge-config` performs the default uninstall and also removes:
+
+- `/etc/relayinner-display/config.toml`
+- `/etc/relayinner-display/config.toml.bak.*`
+- `/etc/relayinner-display/` if it becomes empty after the purge
+
+`/var/lib/relayinner-display/install-state.json` is the restore authority for uninstall. When it is present, uninstall uses it to decide:
+
+- whether the relay service user can be removed safely
+- whether `display-manager.service` existed and was changed by the installer
+- which canonical relay-managed unit and asset paths should be removed
+
+`display-manager.service` is restored only when install-state proves both `existed=true` and `changed_by_installer=true`. If the unit was masked before install, uninstall leaves it masked. If it was enabled before install, uninstall enables it again. If it was active before install, uninstall starts it again.
+
+If `install-state.json` is missing, uninstall prints one best-effort warning, removes the canonical relay assets by known path, restores `getty@tty1.service`, and preserves the relay service user plus home directory because installer ownership can no longer be proven safely. In that mode it does not attempt to restore `display-manager.service`.
+
+After uninstall, verify that the relay stack is gone and the host login path is back:
+
+```sh
+systemctl status getty@tty1.service
+test -e /etc/systemd/system/relayinner-displayd.service && echo "relay unit still present" || echo "relay units removed"
+test -e /etc/systemd/logind.conf.d/relayinner-display.conf && echo "logind override still present" || echo "logind override removed"
+test -e /var/lib/relayinner-display/install-state.json && echo "install-state still present" || echo "install-state removed"
+```
+
 ## Managed Paths
 
 - `/usr/local/lib/relayinner-display/`
