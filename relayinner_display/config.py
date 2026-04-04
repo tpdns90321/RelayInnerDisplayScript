@@ -183,9 +183,9 @@ def parse_config(raw: dict[str, Any]) -> AppConfig:
     return AppConfig(
         target=target,
         runtime=runtime,
+        policy=policy,
         display=display,
         input=input_config,
-        policy=policy,
     )
 
 

@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "relayinner-display"
 version = "0.1.0"
-description = "SPEC-10/11/13 runtime core for RelayInnerDisplayScript"
+description = "SPEC-10/11/12/13 runtime core for RelayInnerDisplayScript"
 readme = "README.md"
 requires-python = ">=3.11"
 authors = [

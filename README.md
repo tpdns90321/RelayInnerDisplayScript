@@ -6,14 +6,15 @@ The target outcome is a small appliance-like runtime that takes one VM managed b
 
 ## Status
 
-This repository now includes the core runtime slices for Specs 10, 11, and 13.
+This repository now includes the first four runtime slices for the MVP.
 
 - The MVP architecture and behavior are defined in `./specs`.
 - Spec 10 now has a Python implementation for config loading, daemon/session IPC, local Proxmox command wrappers, SPICE `.vv` generation, and reconnect state handling.
 - Spec 11 now extends the runtime with a Cage session entrypoint, session-side waiting/degraded/sleeping view state, and Wayland display-power IPC handling.
+- Spec 12 now adds display-policy config, daemon-side VM power to DPMS mapping, delayed display sleep, and power-intent reapplication after session reconnect.
 - Spec 13 now extends the daemon with host power-button validation, evdev button capture, debounced guest start/shutdown forwarding, and runtime button-action tracking.
 - The current design still assumes direct installation on a Proxmox host, not an LXC container.
-- Final host deployment details for `tty1`, systemd installation, DPMS policy wiring, the logind override installation, and bootstrap remain pending in later specs.
+- Final host deployment details for `tty1`, systemd installation, the `logind` override installation, and bootstrap remain pending in later specs.
 
 ## MVP Goals
 
@@ -45,13 +46,13 @@ The current MVP design assumes:
 
 Current implementation coverage:
 
-- `relayinner_display.config` validates the shared TOML config model from Spec 10.
-- `relayinner_display.proxmox` wraps local `qm` and `pvesh` calls and writes `remote-viewer` `.vv` files.
-- `relayinner_display.daemon` owns the VM/session state machine and the Unix-socket control path.
+- `relayinner_display.config` validates the shared TOML config model from Specs 10, 12, and 13.
+- `relayinner_display.proxmox` wraps local `qm` and `pvesh` calls, writes `remote-viewer` `.vv` files, and submits guest start/shutdown requests.
+- `relayinner_display.daemon` owns the VM/session state machine, evaluates VM power to display-power policy, debounces display sleep, captures host power-button intent, and writes the expanded runtime state to disk.
 - `relayinner_display.input` validates host `logind` power-key policy and captures `KEY_POWER` presses from one evdev node.
-- `relayinner_display.session` supervises `remote-viewer`, tracks waiting/degraded/display-sleeping session state, and applies `wlopm`-style display-power actions from the Wayland session context.
+- `relayinner_display.session` supervises `remote-viewer`, tracks waiting/degraded/display-sleeping session state, applies `wlopm`-style display-power actions from the Wayland session context, and reapplies daemon power intent after reconnect.
 - `relayinner_display.kiosk` provides the Cage session entrypoint and the canonical `seatd-launch -- cage -- ...` command shape from Spec 11.
-- `tests/` covers config parsing, IPC validation, Proxmox command handling, reconnect logic, session supervision, logind policy parsing, power-button handling, display-power handling, and kiosk entrypoint wiring.
+- `tests/` covers config parsing, IPC validation, Proxmox command handling, reconnect logic, daemon DPMS debounce behavior, session supervision, logind policy parsing, power-button handling, display-power handling, and kiosk entrypoint wiring.
 
 Operationally, the appliance is expected to move through a small state machine:
 
@@ -112,7 +113,7 @@ The final implementation is expected to manage:
 └── tasks/
 ```
 
-- `relayinner_display/` holds the current Python runtime for the implemented spec slices.
+- `relayinner_display/` holds the current Python runtime for Specs 10 through 13.
 - `specs/` holds the MVP specification set.
 - `tests/` holds unit tests for the current runtime slice.
 - `tasks/` is reserved for task/worktree-oriented workflow.

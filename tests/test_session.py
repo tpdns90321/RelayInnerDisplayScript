@@ -96,7 +96,7 @@ class SessionSupervisorTests(unittest.TestCase):
         self.assertEqual(event, {"type": "console_exited", "code": 1, "signal": 0})
         self.assertEqual(supervisor.view_state.status_text, "Connection lost")
 
-    def test_display_power_uses_wlopm_and_reports_applied(self) -> None:
+    def test_display_power_uses_configured_helper_and_reports_applied(self) -> None:
         commands: list[tuple[list[str], dict[str, str]]] = []
 
         def fake_power_runner(
@@ -110,7 +110,7 @@ class SessionSupervisorTests(unittest.TestCase):
             return subprocess.CompletedProcess(command, 0, "", "")
 
         supervisor = SessionSupervisor(
-            config=build_config(),
+            config=build_config(power_helper="relay-wlopm"),
             power_command_runner=fake_power_runner,
         )
 
@@ -119,7 +119,7 @@ class SessionSupervisorTests(unittest.TestCase):
         )
 
         self.assertEqual(events, [{"type": "display_power_applied", "state": "off"}])
-        self.assertEqual(commands[0][0], ["wlopm", "--off", "HDMI-A-1"])
+        self.assertEqual(commands[0][0], ["relay-wlopm", "--off", "HDMI-A-1"])
         self.assertEqual(supervisor.view_state.status_text, "Display sleeping")
 
     def test_display_power_failure_is_nonfatal(self) -> None:
@@ -145,7 +145,7 @@ class SessionSupervisorTests(unittest.TestCase):
         self.assertEqual(supervisor.view_state.display_power_state, "on")
 
 
-def build_config() -> AppConfig:
+def build_config(power_helper: str = "wlopm") -> AppConfig:
     run_dir = Path("/run/relayinner-display")
     return AppConfig(
         target=TargetConfig(
@@ -161,8 +161,8 @@ def build_config() -> AppConfig:
             log_namespace="relayinner-display",
         ),
         display=DisplayConfig(
-            output_name="",
-            power_helper="wlopm",
+            output_name="HDMI-A-1",
+            power_helper=power_helper,
         ),
         input=InputConfig(
             power_button_event=Path("/dev/input/by-path/platform-i8042-serio-0-event-power"),

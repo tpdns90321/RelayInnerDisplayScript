@@ -21,8 +21,10 @@ from .proxmox import ProxmoxClient, ProxmoxCommandError
 DEFAULT_CONFIG_PATH = Path("/etc/relayinner-display/config.toml")
 SESSION_USER = "relayinner-display"
 SESSION_GROUP = "relayinner-display"
-RUNNING_VM_STATES = {"running", "paused"}
-STOPPED_VM_STATES = {"stopped", "shutdown"}
+DISPLAY_ON_VM_STATES = {"running", "paused", "suspended"}
+DISPLAY_OFF_VM_STATES = {"stopped", "shutdown"}
+POWER_BUTTON_RUNNING_VM_STATES = {"running", "paused"}
+POWER_BUTTON_STOPPED_VM_STATES = {"stopped", "shutdown"}
 
 
 def utcnow() -> datetime:
@@ -142,6 +144,9 @@ class DisplayDaemon:
         self.console_pid: int | None = None
         self.next_reconnect_at: datetime | None = None
         self.current_reconnect_delay_ms = config.policy.reconnect_initial_ms
+        self.started_at: datetime | None = None
+        self._power_state_since_at: datetime | None = None
+        self._startup_display_policy_pending = True
         self.power_button_source = power_button_source
         self.host_policy_checker = host_policy_checker
         self.startup_error: str | None = None
@@ -162,6 +167,7 @@ class DisplayDaemon:
                 path.unlink()
 
     def start(self, now: datetime | None = None) -> None:
+        self.started_at = now or utcnow()
         self.state.node_name = self.proxmox.resolve_node_name(self.config.target.node_name)
         try:
             self._prepare_power_button_capture()
@@ -204,14 +210,19 @@ class DisplayDaemon:
                 self._transition(SessionState.DEGRADED)
                 self._persist_state()
                 return [{"type": "show_waiting", "reason": "degraded"}]
-            if self.state.vm_power_state in RUNNING_VM_STATES:
+
+            responses: list[dict[str, object]] = []
+            responses.extend(self._reapply_display_power())
+            if self._vm_can_show_console(self.state.vm_power_state):
                 self._transition(SessionState.RECONNECTING_CONSOLE)
                 self._persist_state()
-                return [{"type": "show_waiting", "reason": "reconnecting"}]
+                responses.append({"type": "show_waiting", "reason": "reconnecting"})
+                return responses
 
-            self._transition(SessionState.WAITING_FOR_VM)
+            self._transition(self._waiting_session_state())
             self._persist_state()
-            return [{"type": "show_waiting", "reason": "vm_stopped"}]
+            responses.append({"type": "show_waiting", "reason": "vm_stopped"})
+            return responses
 
         if message_type == "console_started":
             self.console_running = True
@@ -226,6 +237,8 @@ class DisplayDaemon:
 
         if message_type == "display_power_applied":
             self.state.display_power_applied = str(payload["state"])
+            if not self.console_running and not self._vm_can_show_console(self.state.vm_power_state):
+                self._transition(self._waiting_session_state())
             self._persist_state()
             self.logger.info("Display power applied in session: %s", payload["state"])
             return []
@@ -238,14 +251,14 @@ class DisplayDaemon:
             self.state.last_error = (
                 f"remote-viewer exited unexpectedly (code={exit_code}, signal={exit_signal})"
             )
-            if self.state.vm_power_state in RUNNING_VM_STATES:
+            if self._vm_can_show_console(self.state.vm_power_state):
                 self._schedule_reconnect(timestamp)
                 self._transition(SessionState.RECONNECTING_CONSOLE)
                 self._persist_state()
                 self.logger.warning("%s", self.state.last_error)
                 return [{"type": "show_waiting", "reason": "reconnecting"}]
 
-            self._transition(SessionState.WAITING_FOR_VM)
+            self._transition(self._waiting_session_state())
             self._persist_state()
             return [{"type": "show_waiting", "reason": "vm_stopped"}]
 
@@ -263,64 +276,52 @@ class DisplayDaemon:
     def tick(self, now: datetime | None = None) -> list[dict[str, object]]:
         timestamp = now or utcnow()
         actions = self._poll_power_button_source(timestamp)
-
         if self.startup_error is not None:
-            return actions
-
-        if not self.session_ready and not self.state.power_button_action_in_flight:
             return actions
 
         try:
             vm_status = self.proxmox.get_vm_status(self.config.target.vmid)
         except ProxmoxCommandError as exc:
-            if not self.session_ready:
-                self.state.last_error = str(exc)
-                self._persist_state()
-                self.logger.error("Unable to poll VM status while tracking power-button action: %s", exc)
-                return actions
-            return actions + self._enter_degraded(str(exc))
+            return actions + self._handle_status_poll_failure(str(exc))
 
-        self.state.vm_power_state = vm_status
+        self._record_vm_power_state(vm_status, timestamp)
         self._refresh_power_button_action(timestamp, vm_status)
-
+        display_actions = self._update_display_power_intent(timestamp)
         if not self.session_ready:
             self._persist_state()
             return actions
 
-        return actions + self._tick_session_state(timestamp, vm_status)
-
-    def close(self) -> None:
-        if self.power_button_source is not None:
-            close = getattr(self.power_button_source, "close", None)
-            if callable(close):
-                close()
-
-    def _tick_session_state(self, timestamp: datetime, vm_status: str) -> list[dict[str, object]]:
-        if vm_status not in RUNNING_VM_STATES:
+        if self._vm_is_off(vm_status):
             self.next_reconnect_at = None
             self.current_reconnect_delay_ms = self.config.policy.reconnect_initial_ms
-            self.state.last_error = None
-            actions: list[dict[str, object]] = []
+            actions_for_session: list[dict[str, object]] = []
             if self.console_running:
                 self.console_running = False
                 self.console_pid = None
-                actions.append({"type": "disconnect_console", "reason": "vm_not_running"})
-            if self.state.session_state != SessionState.WAITING_FOR_VM:
-                actions.append({"type": "show_waiting", "reason": "vm_stopped"})
-            self._transition(SessionState.WAITING_FOR_VM)
+                actions_for_session.append({"type": "disconnect_console", "reason": "vm_not_running"})
+            if self.state.session_state not in (
+                SessionState.WAITING_FOR_VM,
+                SessionState.DISPLAY_SLEEPING,
+            ):
+                actions_for_session.append({"type": "show_waiting", "reason": "vm_stopped"})
+            self._transition(self._waiting_session_state())
             self._persist_state()
-            return actions
+            return actions + actions_for_session + display_actions
+
+        if not self._vm_can_show_console(vm_status):
+            self._persist_state()
+            return actions + display_actions
 
         if self.console_running:
             self.state.last_error = None
             self._transition(SessionState.SHOWING_CONSOLE)
             self._persist_state()
-            return []
+            return actions + display_actions
 
         if self.next_reconnect_at is not None and timestamp < self.next_reconnect_at:
             self._transition(SessionState.RECONNECTING_CONSOLE)
             self._persist_state()
-            return []
+            return actions + display_actions
 
         try:
             self._transition(SessionState.REQUESTING_CONSOLE)
@@ -337,7 +338,7 @@ class DisplayDaemon:
                 self.logger,
             )
         except ProxmoxCommandError as exc:
-            return self._enter_degraded(str(exc))
+            return actions + self._enter_degraded(str(exc))
 
         self.state.last_error = None
         self.state.mark_connect_attempt(timestamp)
@@ -345,7 +346,15 @@ class DisplayDaemon:
         self._transition(SessionState.CONNECTING_CONSOLE)
         self._persist_state()
         self.logger.info("Prepared SPICE config for VM %s", self.state.vmid)
-        return [{"type": "connect_spice", "vv_path": str(self.config.runtime.spice_vv_path)}]
+        return actions + display_actions + [
+            {"type": "connect_spice", "vv_path": str(self.config.runtime.spice_vv_path)}
+        ]
+
+    def close(self) -> None:
+        if self.power_button_source is not None:
+            close = getattr(self.power_button_source, "close", None)
+            if callable(close):
+                close()
 
     def _prepare_power_button_capture(self) -> None:
         if not self.config.input.forward_power_button:
@@ -412,10 +421,10 @@ class DisplayDaemon:
             )
             return
 
-        if vm_status in STOPPED_VM_STATES:
+        if vm_status in POWER_BUTTON_STOPPED_VM_STATES:
             action = self.config.policy.power_button_action_when_stopped
             command = lambda: self.proxmox.start_vm(self.config.target.vmid)
-        elif vm_status in RUNNING_VM_STATES:
+        elif vm_status in POWER_BUTTON_RUNNING_VM_STATES:
             action = self.config.policy.power_button_action_when_running
             command = lambda: self.proxmox.shutdown_vm(
                 self.config.target.vmid,
@@ -463,7 +472,7 @@ class DisplayDaemon:
 
         action = self.state.last_power_button_action
         if action == "start":
-            if vm_status in RUNNING_VM_STATES:
+            if vm_status in POWER_BUTTON_RUNNING_VM_STATES:
                 self.state.power_button_action_in_flight = False
                 self.state.last_power_button_result = "completed"
                 self.power_button_action_started_at = None
@@ -481,7 +490,7 @@ class DisplayDaemon:
                 return
 
         if action == "shutdown":
-            if vm_status in STOPPED_VM_STATES:
+            if vm_status in POWER_BUTTON_STOPPED_VM_STATES:
                 self.state.power_button_action_in_flight = False
                 self.state.last_power_button_result = "completed"
                 self.power_button_action_started_at = None
@@ -491,7 +500,7 @@ class DisplayDaemon:
                 self.power_button_action_started_at is not None
                 and self._elapsed_ms(self.power_button_action_started_at, timestamp)
                 >= self.config.policy.shutdown_timeout_s * 1000
-                and vm_status not in STOPPED_VM_STATES
+                and vm_status not in POWER_BUTTON_STOPPED_VM_STATES
             ):
                 self.state.power_button_action_in_flight = False
                 self.state.last_power_button_result = "timed_out"
@@ -541,6 +550,88 @@ class DisplayDaemon:
             self.current_reconnect_delay_ms * 2,
             self.config.policy.reconnect_max_ms,
         )
+
+    def _record_vm_power_state(self, vm_status: str, now: datetime) -> None:
+        if self.state.vm_power_state != vm_status or self._power_state_since_at is None:
+            self._power_state_since_at = now
+            self.state.mark_power_state_since(now)
+        self.state.vm_power_state = vm_status
+
+    def _handle_status_poll_failure(self, reason: str) -> list[dict[str, object]]:
+        if self.state.last_error != reason:
+            self.logger.warning("VM status poll failed: %s", reason)
+        self.state.last_error = reason
+        self._persist_state()
+        return []
+
+    def _update_display_power_intent(self, now: datetime) -> list[dict[str, object]]:
+        target_intent = self._desired_display_power_intent(now)
+        if target_intent is None or target_intent == self.state.display_power_intent:
+            return []
+
+        previous_intent = self.state.display_power_intent
+        self.state.display_power_intent = target_intent
+        self.logger.info(
+            "Display power intent changed: %s -> %s (vm_state=%s)",
+            previous_intent,
+            target_intent,
+            self.state.vm_power_state,
+        )
+        if not self.session_ready:
+            return []
+        return [self._display_power_message(target_intent)]
+
+    def _desired_display_power_intent(self, now: datetime) -> str | None:
+        if self.state.vm_power_state in DISPLAY_ON_VM_STATES:
+            self._startup_display_policy_pending = False
+            return "on"
+
+        if self.state.vm_power_state not in DISPLAY_OFF_VM_STATES:
+            return None
+
+        off_since = self._power_state_since_at
+        if off_since is None:
+            return None
+
+        if self._startup_display_policy_pending:
+            if self.started_at is None:
+                return None
+            stabilized_at = self.started_at + timedelta(
+                milliseconds=self.config.policy.power_state_stabilize_ms
+            )
+            if off_since < stabilized_at:
+                off_since = stabilized_at
+
+        due_at = off_since + timedelta(milliseconds=self.config.policy.dpms_off_delay_ms)
+        if now < due_at:
+            return None
+
+        self._startup_display_policy_pending = False
+        return "off"
+
+    def _display_power_message(self, state: str) -> dict[str, object]:
+        return {
+            "type": "display_power",
+            "state": state,
+            "output": self.config.display.output_name,
+        }
+
+    def _reapply_display_power(self) -> list[dict[str, object]]:
+        return [self._display_power_message(self.state.display_power_intent)]
+
+    def _waiting_session_state(self) -> SessionState:
+        if (
+            self.state.display_power_intent == "off"
+            and self.state.display_power_applied == "off"
+        ):
+            return SessionState.DISPLAY_SLEEPING
+        return SessionState.WAITING_FOR_VM
+
+    def _vm_can_show_console(self, vm_status: str) -> bool:
+        return vm_status in DISPLAY_ON_VM_STATES
+
+    def _vm_is_off(self, vm_status: str) -> bool:
+        return vm_status in DISPLAY_OFF_VM_STATES
 
     def _transition(self, session_state: SessionState) -> None:
         if self.state.session_state != session_state:

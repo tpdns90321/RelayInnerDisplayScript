@@ -129,13 +129,13 @@ class SessionSupervisor:
         config: AppConfig,
         logger: logging.Logger | None = None,
         process_factory: ProcessFactory = subprocess.Popen,
-        power_helper: str = "wlopm",
+        power_helper: str | None = None,
         power_command_runner: PowerCommandRunner = subprocess.run,
     ) -> None:
         self.config = config
         self.logger = logger or logging.getLogger(config.runtime.log_namespace)
         self.process_factory = process_factory
-        self.power_helper = power_helper
+        self.power_helper = power_helper or config.display.power_helper
         self.power_command_runner = power_command_runner
         self.viewer_process: subprocess.Popen[str] | None = None
         self.view_state = SessionViewState()
