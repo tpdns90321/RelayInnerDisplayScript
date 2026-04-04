@@ -4,7 +4,13 @@ from pathlib import Path
 import subprocess
 import unittest
 
-from relayinner_display.config import AppConfig, PolicyConfig, RuntimeConfig, TargetConfig
+from relayinner_display.config import (
+    AppConfig,
+    DisplayConfig,
+    PolicyConfig,
+    RuntimeConfig,
+    TargetConfig,
+)
 from relayinner_display.session import SessionSupervisor
 
 
@@ -89,7 +95,7 @@ class SessionSupervisorTests(unittest.TestCase):
         self.assertEqual(event, {"type": "console_exited", "code": 1, "signal": 0})
         self.assertEqual(supervisor.view_state.status_text, "Connection lost")
 
-    def test_display_power_uses_wlopm_and_reports_applied(self) -> None:
+    def test_display_power_uses_configured_helper_and_reports_applied(self) -> None:
         commands: list[tuple[list[str], dict[str, str]]] = []
 
         def fake_power_runner(
@@ -103,7 +109,7 @@ class SessionSupervisorTests(unittest.TestCase):
             return subprocess.CompletedProcess(command, 0, "", "")
 
         supervisor = SessionSupervisor(
-            config=build_config(),
+            config=build_config(power_helper="relay-wlopm"),
             power_command_runner=fake_power_runner,
         )
 
@@ -112,7 +118,7 @@ class SessionSupervisorTests(unittest.TestCase):
         )
 
         self.assertEqual(events, [{"type": "display_power_applied", "state": "off"}])
-        self.assertEqual(commands[0][0], ["wlopm", "--off", "HDMI-A-1"])
+        self.assertEqual(commands[0][0], ["relay-wlopm", "--off", "HDMI-A-1"])
         self.assertEqual(supervisor.view_state.status_text, "Display sleeping")
 
     def test_display_power_failure_is_nonfatal(self) -> None:
@@ -138,7 +144,7 @@ class SessionSupervisorTests(unittest.TestCase):
         self.assertEqual(supervisor.view_state.display_power_state, "on")
 
 
-def build_config() -> AppConfig:
+def build_config(power_helper: str = "wlopm") -> AppConfig:
     run_dir = Path("/run/relayinner-display")
     return AppConfig(
         target=TargetConfig(
@@ -153,11 +159,18 @@ def build_config() -> AppConfig:
             spice_vv_path=run_dir / "current.vv",
             log_namespace="relayinner-display",
         ),
+        display=DisplayConfig(
+            output_name="HDMI-A-1",
+            power_helper=power_helper,
+        ),
         policy=PolicyConfig(
             poll_interval_ms=2000,
             reconnect_initial_ms=1000,
             reconnect_max_ms=15000,
             command_timeout_s=10,
+            dpms_policy="vm-power",
+            dpms_off_delay_ms=5000,
+            power_state_stabilize_ms=3000,
         ),
     )
 

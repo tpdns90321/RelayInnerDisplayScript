@@ -6,13 +6,14 @@ The target outcome is a small appliance-like runtime that takes one VM managed b
 
 ## Status
 
-This repository now includes the first two runtime slices for the MVP.
+This repository now includes the first three runtime slices for the MVP.
 
 - The MVP architecture and behavior are defined in `./specs`.
 - Spec 10 now has a Python implementation for config loading, daemon/session IPC, local Proxmox command wrappers, SPICE `.vv` generation, and reconnect state handling.
 - Spec 11 now extends the runtime with a Cage session entrypoint, session-side waiting/degraded/sleeping view state, and Wayland display-power IPC handling.
+- Spec 12 now adds display-policy config, daemon-side VM power to DPMS mapping, delayed display sleep, and power-intent reapplication after session reconnect.
 - The current design still assumes direct installation on a Proxmox host, not an LXC container.
-- Final host deployment details for `tty1`, systemd installation, DPMS policy wiring, host power-button handling, and bootstrap remain pending in later specs.
+- Final host deployment details for `tty1`, systemd installation, host power-button handling, and bootstrap remain pending in later specs.
 
 ## MVP Goals
 
@@ -46,10 +47,10 @@ Current implementation coverage:
 
 - `relayinner_display.config` validates the shared TOML config model from Spec 10.
 - `relayinner_display.proxmox` wraps local `qm` and `pvesh` calls and writes `remote-viewer` `.vv` files.
-- `relayinner_display.daemon` owns the VM/session state machine and the Unix-socket control path.
-- `relayinner_display.session` supervises `remote-viewer`, tracks waiting/degraded/display-sleeping session state, and applies `wlopm`-style display-power actions from the Wayland session context.
+- `relayinner_display.daemon` owns the VM/session state machine, evaluates VM power to display-power policy, debounces display sleep, and writes the expanded runtime state to disk.
+- `relayinner_display.session` supervises `remote-viewer`, tracks waiting/degraded/display-sleeping session state, applies `wlopm`-style display-power actions from the Wayland session context, and reapplies daemon power intent after reconnect.
 - `relayinner_display.kiosk` provides the Cage session entrypoint and the canonical `seatd-launch -- cage -- ...` command shape from Spec 11.
-- `tests/` covers config parsing, IPC validation, Proxmox command handling, reconnect logic, session supervision, display-power handling, and kiosk entrypoint wiring.
+- `tests/` covers config parsing, IPC validation, Proxmox command handling, reconnect logic, daemon DPMS debounce behavior, session supervision, display-power handling, and kiosk entrypoint wiring.
 
 Operationally, the appliance is expected to move through a small state machine:
 
@@ -110,7 +111,7 @@ The final implementation is expected to manage:
 └── tasks/
 ```
 
-- `relayinner_display/` holds the current Python runtime for Spec 10.
+- `relayinner_display/` holds the current Python runtime for Specs 10 through 12.
 - `specs/` holds the MVP specification set.
 - `tests/` holds unit tests for the current runtime slice.
 - `tasks/` is reserved for task/worktree-oriented workflow.

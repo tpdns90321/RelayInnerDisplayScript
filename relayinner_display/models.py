@@ -17,6 +17,7 @@ class SessionState(str, Enum):
     CONNECTING_CONSOLE = "connecting_console"
     SHOWING_CONSOLE = "showing_console"
     RECONNECTING_CONSOLE = "reconnecting_console"
+    DISPLAY_SLEEPING = "display_sleeping"
     DEGRADED = "degraded"
 
 
@@ -25,20 +26,29 @@ class RuntimeState:
     vmid: int
     node_name: str
     vm_power_state: str = "unknown"
+    display_power_intent: str = "on"
+    display_power_applied: str = "on"
     session_state: SessionState = SessionState.BOOTING
     last_connect_attempt_at: str | None = None
+    power_state_since: str | None = None
     last_error: str | None = None
 
     def mark_connect_attempt(self, when: datetime) -> None:
         self.last_connect_attempt_at = when.isoformat().replace("+00:00", "Z")
+
+    def mark_power_state_since(self, when: datetime) -> None:
+        self.power_state_since = when.isoformat().replace("+00:00", "Z")
 
     def to_dict(self) -> dict[str, str | int | None]:
         return {
             "vmid": self.vmid,
             "node_name": self.node_name,
             "vm_power_state": self.vm_power_state,
+            "display_power_intent": self.display_power_intent,
+            "display_power_applied": self.display_power_applied,
             "session_state": self.session_state.value,
             "last_connect_attempt_at": self.last_connect_attempt_at,
+            "power_state_since": self.power_state_since,
             "last_error": self.last_error,
         }
 

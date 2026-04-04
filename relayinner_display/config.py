@@ -7,6 +7,7 @@ import tomllib
 
 
 SUPPORTED_CONSOLE_BACKENDS = {"spice"}
+SUPPORTED_DPMS_POLICIES = {"vm-power"}
 
 
 class ConfigError(ValueError):
@@ -34,17 +35,27 @@ class RuntimeConfig:
 
 
 @dataclass(frozen=True)
+class DisplayConfig:
+    output_name: str
+    power_helper: str
+
+
+@dataclass(frozen=True)
 class PolicyConfig:
     poll_interval_ms: int
     reconnect_initial_ms: int
     reconnect_max_ms: int
     command_timeout_s: int
+    dpms_policy: str
+    dpms_off_delay_ms: int
+    power_state_stabilize_ms: int
 
 
 @dataclass(frozen=True)
 class AppConfig:
     target: TargetConfig
     runtime: RuntimeConfig
+    display: DisplayConfig
     policy: PolicyConfig
 
 
@@ -64,6 +75,7 @@ def parse_config(raw: dict[str, Any]) -> AppConfig:
     target_table = _require_table(raw, "target")
     runtime_table = _require_table(raw, "runtime")
     policy_table = _require_table(raw, "policy")
+    display_table = _optional_table(raw, "display")
 
     target = TargetConfig(
         vmid=_require_positive_int(target_table, "vmid"),
@@ -86,22 +98,52 @@ def parse_config(raw: dict[str, Any]) -> AppConfig:
     _require_child_path(runtime.run_dir, runtime.control_socket, "runtime.control_socket")
     _require_child_path(runtime.run_dir, runtime.spice_vv_path, "runtime.spice_vv_path")
 
+    display = DisplayConfig(
+        output_name=_optional_string(display_table, "output_name", default=""),
+        power_helper=_optional_non_empty_string(display_table, "power_helper", default="wlopm"),
+    )
+
     policy = PolicyConfig(
         poll_interval_ms=_require_positive_int(policy_table, "poll_interval_ms"),
         reconnect_initial_ms=_require_positive_int(policy_table, "reconnect_initial_ms"),
         reconnect_max_ms=_require_positive_int(policy_table, "reconnect_max_ms"),
         command_timeout_s=_require_positive_int(policy_table, "command_timeout_s"),
+        dpms_policy=_optional_non_empty_string(policy_table, "dpms_policy", default="vm-power"),
+        dpms_off_delay_ms=_optional_non_negative_int(
+            policy_table,
+            "dpms_off_delay_ms",
+            default=5000,
+        ),
+        power_state_stabilize_ms=_optional_non_negative_int(
+            policy_table,
+            "power_state_stabilize_ms",
+            default=3000,
+        ),
     )
     if policy.reconnect_initial_ms > policy.reconnect_max_ms:
         raise ConfigError("policy.reconnect_initial_ms must be <= policy.reconnect_max_ms")
+    if policy.dpms_policy not in SUPPORTED_DPMS_POLICIES:
+        supported = ", ".join(sorted(SUPPORTED_DPMS_POLICIES))
+        raise ConfigError(
+            f"Unsupported dpms_policy={policy.dpms_policy!r}; supported values: {supported}"
+        )
 
-    return AppConfig(target=target, runtime=runtime, policy=policy)
+    return AppConfig(target=target, runtime=runtime, display=display, policy=policy)
 
 
 def _require_table(raw: dict[str, Any], key: str) -> dict[str, Any]:
     value = raw.get(key)
     if not isinstance(value, dict):
         raise ConfigError(f"Missing required [{key}] table")
+    return value
+
+
+def _optional_table(raw: dict[str, Any], key: str) -> dict[str, Any]:
+    value = raw.get(key)
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ConfigError(f"Invalid [{key}] table")
     return value
 
 
@@ -112,10 +154,31 @@ def _require_non_empty_string(table: dict[str, Any], key: str) -> str:
     return value
 
 
+def _optional_string(table: dict[str, Any], key: str, default: str) -> str:
+    value = table.get(key, default)
+    if not isinstance(value, str):
+        raise ConfigError(f"Missing or invalid string value for {key!r}")
+    return value
+
+
+def _optional_non_empty_string(table: dict[str, Any], key: str, default: str) -> str:
+    value = table.get(key, default)
+    if not isinstance(value, str) or not value.strip():
+        raise ConfigError(f"Missing or invalid string value for {key!r}")
+    return value
+
+
 def _require_positive_int(table: dict[str, Any], key: str) -> int:
     value = table.get(key)
     if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
         raise ConfigError(f"Missing or invalid positive integer value for {key!r}")
+    return value
+
+
+def _optional_non_negative_int(table: dict[str, Any], key: str, default: int) -> int:
+    value = table.get(key, default)
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ConfigError(f"Missing or invalid non-negative integer value for {key!r}")
     return value
 
 
