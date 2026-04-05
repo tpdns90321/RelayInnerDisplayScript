@@ -24,7 +24,7 @@ def build_session_entrypoint_command(
 
 
 def build_kiosk_service_command(entrypoint_path: str = DEFAULT_ENTRYPOINT_PATH) -> list[str]:
-    return ["seatd-launch", "--", "cage", "--", entrypoint_path]
+    return ["cage", "--", entrypoint_path]
 
 
 def build_parser() -> ArgumentParser:

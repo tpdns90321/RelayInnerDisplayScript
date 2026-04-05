@@ -223,12 +223,10 @@ def build_installed_daemon_command(
 
 def build_installed_kiosk_command(
     paths: HostInstallPaths = HostInstallPaths(),
-    seatd_launch_binary: str | None = None,
     cage_binary: str | None = None,
 ) -> list[str]:
-    seatd_launch_binary = seatd_launch_binary or resolve_host_binary("seatd-launch", "/usr/bin/seatd-launch")
     cage_binary = cage_binary or resolve_host_binary("cage", "/usr/bin/cage")
-    return [seatd_launch_binary, "--", cage_binary, "--", str(paths.session_entrypoint_launcher)]
+    return [cage_binary, "--", str(paths.session_entrypoint_launcher)]
 
 
 def build_installed_seatd_command(

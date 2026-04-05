@@ -49,12 +49,12 @@ User and seat model:
 
 - system user: `relayinner-display`
 - fixed TTY: `/dev/tty1`
-- session launcher: `seatd-launch`
+- session launcher: `cage`, connected to `relayinner-display-seatd.service`
 
 Display service command:
 
 ```text
-seatd-launch -- cage -- /usr/local/lib/relayinner-display/session-entrypoint
+cage -- /usr/local/lib/relayinner-display/session-entrypoint
 ```
 
 Host session policy:
@@ -113,7 +113,7 @@ No user-generated state is persisted. The session reconstructs its state from da
 Permissions:
 
 - `relayinner-display-session` runs as a non-login account with no interactive shell.
-- Device access is granted only through the seatd-launched session.
+- Device access is granted only through the seatd-managed session.
 
 Isolation:
 

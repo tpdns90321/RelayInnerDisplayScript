@@ -11,8 +11,6 @@ class KioskTests(unittest.TestCase):
         self.assertEqual(
             build_kiosk_service_command(),
             [
-                "seatd-launch",
-                "--",
                 "cage",
                 "--",
                 "/usr/local/lib/relayinner-display/session-entrypoint",

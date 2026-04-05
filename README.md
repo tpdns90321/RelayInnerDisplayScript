@@ -45,7 +45,7 @@ sudo cat /var/lib/relayinner-display/install-state.json
 
 For the full operator procedure, package assumptions, managed paths, troubleshooting commands, and installer flag details, see [`./docs/proxmox-host-setup.md`](./docs/proxmox-host-setup.md).
 
-If the kiosk journal shows `libseat` errors such as `Could not connect to socket /run/seatd.sock: Permission denied`, `Could not open target tty: Permission denied`, or `Failed to start a DRM session`, refresh the installed units with `sudo ./install.sh` before debugging further. The current kiosk unit is expected to launch `seatd-launch -- cage -- /usr/local/lib/relayinner-display/session-entrypoint`, and the seatd unit now resolves the installed `seatd` binary path instead of assuming `/usr/bin/seatd`.
+If the kiosk journal shows `libseat` errors such as `Could not connect to socket /run/seatd.sock: Permission denied`, `Could not open target tty: Permission denied`, or `Failed to start a DRM session`, refresh the installed units with `sudo ./install.sh` before debugging further. The current kiosk unit is expected to launch `cage -- /usr/local/lib/relayinner-display/session-entrypoint` while `relayinner-display-seatd.service` owns `/run/seatd.sock`; older installs that still wrap Cage with `seatd-launch` can exit immediately with `status=1`.
 
 ## Uninstall
 
@@ -100,7 +100,7 @@ Current implementation coverage:
 - `relayinner_display.daemon` now owns the end-to-end appliance state machine, validates required runtime binaries, degrades after repeated local Proxmox failures, captures host power-button intent, and writes the Spec 15 runtime state contract to disk.
 - `relayinner_display.input` validates host `logind` power-key policy and captures `KEY_POWER` presses from one evdev node.
 - `relayinner_display.session` supervises `remote-viewer`, tracks waiting/degraded/display-sleeping session state, applies `wlopm`-style display-power actions from the Wayland session context, and emits subsystem-scoped session, console, and display logs.
-- `relayinner_display.kiosk` provides the Cage session entrypoint and the canonical `seatd-launch -- cage -- ...` command shape from Spec 11.
+- `relayinner_display.kiosk` provides the Cage session entrypoint and the canonical `cage -- ...` command shape against the managed `relayinner-display-seatd.service`.
 - `relayinner_display.bootstrap` renders the sample config, systemd units, logind override, the Spec 15 `StartLimitIntervalSec=120` / `StartLimitBurst=5` restart-loop policy, the Spec 16 install-state record under `/var/lib/relayinner-display/install-state.json`, and the Spec 17 uninstall flow that restores `tty1` plus optional display-manager state conservatively.
 - `tests/` now cover config parsing, IPC validation, Proxmox command handling, reconnect logic, daemon DPMS debounce behavior, Spec 15 state persistence, runtime dependency degradation, restart-threshold rendering, install-state persistence, uninstall fallback and purge behavior, session supervision, logind policy parsing, power-button handling, display-power handling, and kiosk entrypoint wiring.
 
