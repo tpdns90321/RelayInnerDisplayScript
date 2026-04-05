@@ -218,9 +218,10 @@ def build_installed_daemon_command(
 
 def build_installed_kiosk_command(
     paths: HostInstallPaths = HostInstallPaths(),
+    seatd_launch_binary: str = "/usr/bin/seatd-launch",
     cage_binary: str = "/usr/bin/cage",
 ) -> list[str]:
-    return [cage_binary, "--", str(paths.session_entrypoint_launcher)]
+    return [seatd_launch_binary, "--", cage_binary, "--", str(paths.session_entrypoint_launcher)]
 
 
 def build_installed_seatd_command(
@@ -274,7 +275,6 @@ def render_kiosk_service(paths: HostInstallPaths = HostInstallPaths()) -> str:
         Environment=PATH={DEFAULT_PATH_ENV}
         Environment=XDG_RUNTIME_DIR=/run/relayinner-display/user-runtime
         Environment=XDG_SESSION_TYPE=wayland
-        Environment=SEATD_SOCK=/run/seatd.sock
         PermissionsStartOnly=true
         ExecStartPre=/usr/bin/install -d -o {SERVICE_USER} -g {SERVICE_GROUP} -m 0750 /run/relayinner-display
         ExecStartPre=/usr/bin/install -d -o {SERVICE_USER} -g {SERVICE_GROUP} -m 0700 /run/relayinner-display/user-runtime

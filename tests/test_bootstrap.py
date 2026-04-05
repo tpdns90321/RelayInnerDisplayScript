@@ -173,7 +173,13 @@ class BootstrapTests(unittest.TestCase):
         )
         self.assertEqual(
             build_installed_kiosk_command(paths),
-            ["/usr/bin/cage", "--", "/usr/local/lib/relayinner-display/session-entrypoint"],
+            [
+                "/usr/bin/seatd-launch",
+                "--",
+                "/usr/bin/cage",
+                "--",
+                "/usr/local/lib/relayinner-display/session-entrypoint",
+            ],
         )
         self.assertEqual(
             build_installed_seatd_command(),
@@ -193,8 +199,12 @@ class BootstrapTests(unittest.TestCase):
         self.assertIn(f"StartLimitIntervalSec={SYSTEMD_START_LIMIT_INTERVAL_SEC}", daemon_unit)
         self.assertIn(f"StartLimitBurst={SYSTEMD_START_LIMIT_BURST}", daemon_unit)
         self.assertIn("Requires=relayinner-display-seatd.service relayinner-displayd.service", kiosk_unit)
+        self.assertIn(
+            "ExecStart=/usr/bin/seatd-launch -- /usr/bin/cage -- /usr/local/lib/relayinner-display/session-entrypoint",
+            kiosk_unit,
+        )
         self.assertIn("TTYPath=/dev/tty1", kiosk_unit)
-        self.assertIn("Environment=SEATD_SOCK=/run/seatd.sock", kiosk_unit)
+        self.assertNotIn("Environment=SEATD_SOCK=/run/seatd.sock", kiosk_unit)
         self.assertIn(f"StartLimitIntervalSec={SYSTEMD_START_LIMIT_INTERVAL_SEC}", kiosk_unit)
         self.assertIn(f"StartLimitBurst={SYSTEMD_START_LIMIT_BURST}", seatd_unit)
 

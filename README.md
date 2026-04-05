@@ -45,6 +45,8 @@ sudo cat /var/lib/relayinner-display/install-state.json
 
 For the full operator procedure, package assumptions, managed paths, troubleshooting commands, and installer flag details, see [`./docs/proxmox-host-setup.md`](./docs/proxmox-host-setup.md).
 
+If the kiosk journal shows `libseat` errors such as `Could not connect to socket /run/seatd.sock: Permission denied`, `Could not open target tty: Permission denied`, or `Failed to start a DRM session`, refresh the installed units with `sudo ./install.sh` before debugging further. The current kiosk unit is expected to launch `seatd-launch -- cage -- /usr/local/lib/relayinner-display/session-entrypoint`.
+
 ## Uninstall
 
 To remove the relay appliance and return the host to its normal local-login path, run:

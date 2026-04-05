@@ -164,3 +164,5 @@ Then inspect journald by subsystem:
 - `relayinner-display.display` for display power helper failures
 - `relayinner-display.input` for host power-button validation or evdev read failures
 - `relayinner-display.session` for session connection and state-transition events
+
+If the kiosk journal shows the `libseat` sequence `Could not connect to socket /run/seatd.sock: Permission denied`, `Could not open target tty: Permission denied`, `Timeout waiting session to become active`, or `Unable to create the wlroots backend`, confirm the installed kiosk unit launches `seatd-launch -- cage -- /usr/local/lib/relayinner-display/session-entrypoint`. Older installs rendered the kiosk unit differently; rerun `sudo ./install.sh`, then restart `relayinner-display-seatd.service`, `relayinner-displayd.service`, and `relayinner-display-kiosk.service` to refresh the unit files before chasing host-level permissions.
