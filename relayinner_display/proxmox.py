@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlsplit
 from typing import Any, Callable, Mapping, Sequence
 import json
 import os
@@ -52,7 +53,9 @@ class ProxmoxClient:
     ) -> None:
         self.timeout_s = timeout_s
         self.runner = runner
-        self.hostname_resolver = hostname_resolver or (lambda: socket.gethostname().split(".")[0])
+        self.hostname_resolver = hostname_resolver or (
+            lambda: socket.gethostname().split(".")[0]
+        )
         self.fqdn_resolver = fqdn_resolver or socket.getfqdn
 
     def resolve_node_name(self, configured_name: str) -> str:
@@ -61,7 +64,9 @@ class ProxmoxClient:
 
         short_hostname = self.hostname_resolver()
         try:
-            nodes = self._run_json(["pvesh", "get", "/nodes", "--output-format", "json"])
+            nodes = self._run_json(
+                ["pvesh", "get", "/nodes", "--output-format", "json"]
+            )
         except ProxmoxCommandError:
             return short_hostname
 
@@ -86,7 +91,9 @@ class ProxmoxClient:
         result = self._run(["qm", "status", str(vmid)])
         match = re.search(r"status:\s+(\S+)", result.stdout)
         if not match:
-            raise ProxmoxCommandError(f"qm status returned unexpected output for VM {vmid}")
+            raise ProxmoxCommandError(
+                f"qm status returned unexpected output for VM {vmid}"
+            )
         return match.group(1)
 
     def start_vm(self, vmid: int) -> None:
@@ -124,7 +131,12 @@ class ProxmoxClient:
         path.parent.mkdir(parents=True, exist_ok=True)
         lines = ["[virt-viewer]"]
         for key, value in sorted(spice_config.items()):
-            serialized_value = str(value).replace("\\", "\\\\").replace("\r", "\\r").replace("\n", "\\n")
+            serialized_value = str(value)
+            if key == "delete-this-file":
+                continue
+            elif key == "proxy":
+                port = urlsplit(value).port
+                value = f"http://127.0.0.1:{port}"
             lines.append(f"{key}={serialized_value}")
         self._atomic_write(path, "\n".join(lines) + "\n")
 

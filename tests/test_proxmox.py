@@ -19,7 +19,9 @@ class ProxmoxTests(unittest.TestCase):
                 stderr="",
             )
 
-        client = ProxmoxClient(timeout_s=10, runner=runner, hostname_resolver=lambda: "pve-01")
+        client = ProxmoxClient(
+            timeout_s=10, runner=runner, hostname_resolver=lambda: "pve-01"
+        )
         self.assertEqual(client.resolve_node_name("auto"), "pve-01")
 
     def test_get_vm_status_parses_qm_output(self) -> None:
@@ -40,7 +42,9 @@ class ProxmoxTests(unittest.TestCase):
             return CommandResult(
                 args=tuple(command),
                 returncode=0,
-                stdout=json.dumps({"host": "127.0.0.1", "port": 61000, "title": "vm-101"}),
+                stdout=json.dumps(
+                    {"host": "127.0.0.1", "port": 61000, "title": "vm-101"}
+                ),
                 stderr="",
             )
 
@@ -70,7 +74,7 @@ class ProxmoxTests(unittest.TestCase):
                 vv_path,
                 {
                     "type": "spice",
-                    "ca": "-----BEGIN CERTIFICATE-----\nLINE2\n-----END CERTIFICATE-----\n",
+                    "ca": "-----BEGIN CERTIFICATE-----\\nLINE2\\n-----END CERTIFICATE-----\\n",
                     "proxy": "http://127.0.0.1:3128",
                 },
             )
@@ -111,7 +115,10 @@ class ProxmoxTests(unittest.TestCase):
         client.start_vm(101)
         client.shutdown_vm(101, timeout_s=90)
 
-        self.assertEqual(commands, [["qm", "start", "101"], ["qm", "shutdown", "101", "--timeout", "90"]])
+        self.assertEqual(
+            commands,
+            [["qm", "start", "101"], ["qm", "shutdown", "101", "--timeout", "90"]],
+        )
 
 
 if __name__ == "__main__":
