@@ -124,7 +124,8 @@ class ProxmoxClient:
         path.parent.mkdir(parents=True, exist_ok=True)
         lines = ["[virt-viewer]"]
         for key, value in sorted(spice_config.items()):
-            lines.append(f"{key}={value}")
+            serialized_value = str(value).replace("\\", "\\\\").replace("\r", "\\r").replace("\n", "\\n")
+            lines.append(f"{key}={serialized_value}")
         self._atomic_write(path, "\n".join(lines) + "\n")
 
     def _run(self, command: Sequence[str]) -> CommandResult:

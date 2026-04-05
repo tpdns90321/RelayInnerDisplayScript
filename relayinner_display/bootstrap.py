@@ -4,7 +4,7 @@ from argparse import ArgumentParser
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from shutil import copy2, copytree, ignore_patterns, rmtree, which
+from shutil import chown, copy2, copytree, ignore_patterns, rmtree, which
 from typing import Callable, Sequence
 import grp
 import json
@@ -45,6 +45,8 @@ SYSTEMD_START_LIMIT_INTERVAL_SEC = 120
 SYSTEMD_START_LIMIT_BURST = 5
 INSTALL_STATE_SCHEMA_VERSION = 1
 RUNTIME_STATE_DIR = Path("/run/relayinner-display")
+CONFIG_DIR_MODE = 0o750
+CONFIG_FILE_MODE = 0o640
 
 
 class BootstrapError(RuntimeError):
@@ -323,6 +325,8 @@ def render_kiosk_service(
         Restart=always
         RestartSec=2
         StandardInput=tty
+        StandardOutput=journal
+        StandardError=journal
         TTYPath=/dev/tty1
         TTYReset=yes
         TTYVHangup=yes
@@ -522,6 +526,7 @@ class HostBootstrapInstaller:
     def install_config(self, *, replace_config: bool) -> InstallResult:
         config_dir = self._stage(self.paths.config_dir)
         config_dir.mkdir(parents=True, exist_ok=True)
+        self._ensure_service_group_access(config_dir, mode=CONFIG_DIR_MODE)
         config_path = self._stage(self.paths.config_path)
         config_backup_path: Path | None = None
         config_action = "created"
@@ -535,8 +540,10 @@ class HostBootstrapInstaller:
                 config_backup_path = self._next_backup_path(config_path)
                 copy2(config_path, config_backup_path)
                 self.output(f"Backed up existing config to {config_backup_path}")
-            self._write_text(config_path, render_sample_config(), mode=0o640)
+            self._write_text(config_path, render_sample_config(), mode=CONFIG_FILE_MODE)
             self.output(f"Installed sample config to {self.paths.config_path}")
+
+        self._ensure_service_group_access(config_path, mode=CONFIG_FILE_MODE)
 
         return InstallResult(
             config_action=config_action,
@@ -915,6 +922,16 @@ class HostBootstrapInstaller:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content, encoding="utf-8")
         path.chmod(mode)
+
+    def _ensure_service_group_access(self, path: Path, *, mode: int) -> None:
+        path.chmod(mode)
+        try:
+            chown(path, group=SERVICE_GROUP)
+        except (LookupError, PermissionError, OSError) as exc:
+            if self.install_root == DEFAULT_STAGE_ROOT:
+                raise BootstrapError(
+                    f"Failed to grant {SERVICE_GROUP!r} group access to {path}: {exc}"
+                ) from exc
 
     def _next_backup_path(self, config_path: Path) -> Path:
         timestamp = self.now_provider().astimezone(timezone.utc).strftime("%Y%m%d%H%M%S")

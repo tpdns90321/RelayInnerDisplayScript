@@ -51,6 +51,12 @@ If the kiosk journal shows `failed to open /dev/dri/renderD128: Permission denie
 
 The kiosk unit also forces `LIBSEAT_BACKEND=seatd` so `cage` uses the same seatd backend that succeeded in transient `systemd-run` debugging instead of relying on libseat backend auto-selection.
 
+If `systemctl status relayinner-display-kiosk.service` shows `cage` starting and then failing a few seconds later while the child process is still `/usr/bin/python3 /usr/local/lib/relayinner-display/session-entrypoint`, refresh the installed runtime with `sudo ./install.sh`. Older installs can still carry the pre-hotfix `relayinner_display/kiosk.py` that tried to exec `relayinner-display-session` by bare name; when `cage` drops `PATH`, that launcher exits immediately and systemd records `status=1`.
+
+If the kiosk journal or a direct `runuser -u relayinner-display -- /usr/local/lib/relayinner-display/session-entrypoint` test shows `PermissionError: [Errno 13] Permission denied: '/etc/relayinner-display/config.toml'`, rerun `sudo ./install.sh` so the installer refreshes `/etc/relayinner-display/` and `config.toml` with relay-group-readable permissions. The session process runs as `relayinner-display`, so the config must be readable by that service group even when the content is preserved across installs.
+
+If `remote-viewer` starts and then exits with a generic dialog such as `Unable to connect graphic server /run/relayinner-display/current.vv`, verify the generated `.vv` file keeps certificate and other multiline values on one escaped line. Proxmox returns the SPICE `ca` field with embedded `\n` escapes; writing that back as literal newlines corrupts the INI-style `.vv` file and can make `remote-viewer` fail immediately even though `pvesh ... spiceproxy` succeeded.
+
 ## Uninstall
 
 To remove the relay appliance and return the host to its normal local-login path, run:

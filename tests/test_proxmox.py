@@ -61,6 +61,27 @@ class ProxmoxTests(unittest.TestCase):
         self.assertIn("host=127.0.0.1", content)
         self.assertIn("port=61000", content)
 
+    def test_write_vv_file_escapes_multiline_values_for_ini_format(self) -> None:
+        client = ProxmoxClient(timeout_s=10, runner=lambda command, timeout_s: None)  # type: ignore[arg-type]
+
+        with TemporaryDirectory() as temp_dir:
+            vv_path = Path(temp_dir) / "current.vv"
+            client.write_vv_file(
+                vv_path,
+                {
+                    "type": "spice",
+                    "ca": "-----BEGIN CERTIFICATE-----\nLINE2\n-----END CERTIFICATE-----\n",
+                    "proxy": "http://127.0.0.1:3128",
+                },
+            )
+            content = vv_path.read_text(encoding="utf-8")
+
+        self.assertIn(
+            "ca=-----BEGIN CERTIFICATE-----\\nLINE2\\n-----END CERTIFICATE-----\\n",
+            content,
+        )
+        self.assertNotIn("ca=-----BEGIN CERTIFICATE-----\nLINE2", content)
+
     def test_nonzero_command_raises(self) -> None:
         def runner(command: list[str], timeout_s: int) -> CommandResult:
             return CommandResult(
