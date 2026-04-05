@@ -131,12 +131,12 @@ class ProxmoxClient:
         path.parent.mkdir(parents=True, exist_ok=True)
         lines = ["[virt-viewer]"]
         for key, value in sorted(spice_config.items()):
-            serialized_value = str(value)
             if key == "delete-this-file":
                 continue
             elif key == "proxy":
                 port = urlsplit(value).port
                 value = f"http://127.0.0.1:{port}"
+            serialized_value = str(value)
             lines.append(f"{key}={serialized_value}")
         self._atomic_write(path, "\n".join(lines) + "\n")
 
