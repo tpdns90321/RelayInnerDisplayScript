@@ -153,6 +153,11 @@ TimestampProvider = Callable[[], datetime]
 ServiceUserExistsChecker = Callable[[str], bool]
 
 
+def resolve_host_binary(binary_name: str, default_path: str) -> str:
+    resolved = which(binary_name, path=DEFAULT_PATH_ENV)
+    return resolved or default_path
+
+
 def render_sample_config() -> str:
     return textwrap.dedent(
         """\
@@ -218,16 +223,19 @@ def build_installed_daemon_command(
 
 def build_installed_kiosk_command(
     paths: HostInstallPaths = HostInstallPaths(),
-    seatd_launch_binary: str = "/usr/bin/seatd-launch",
-    cage_binary: str = "/usr/bin/cage",
+    seatd_launch_binary: str | None = None,
+    cage_binary: str | None = None,
 ) -> list[str]:
+    seatd_launch_binary = seatd_launch_binary or resolve_host_binary("seatd-launch", "/usr/bin/seatd-launch")
+    cage_binary = cage_binary or resolve_host_binary("cage", "/usr/bin/cage")
     return [seatd_launch_binary, "--", cage_binary, "--", str(paths.session_entrypoint_launcher)]
 
 
 def build_installed_seatd_command(
-    seatd_binary: str = "/usr/bin/seatd",
+    seatd_binary: str | None = None,
     group_name: str = SERVICE_GROUP,
 ) -> list[str]:
+    seatd_binary = seatd_binary or resolve_host_binary("seatd", "/usr/bin/seatd")
     return [seatd_binary, "-g", group_name]
 
 

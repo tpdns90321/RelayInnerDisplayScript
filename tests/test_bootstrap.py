@@ -7,6 +7,7 @@ from tempfile import TemporaryDirectory
 import subprocess
 from typing import Callable
 import unittest
+from unittest.mock import patch
 
 from relayinner_display.bootstrap import (
     BootstrapError,
@@ -26,6 +27,7 @@ from relayinner_display.bootstrap import (
     render_seatd_service,
     render_logind_override,
     render_sample_config,
+    resolve_host_binary,
 )
 from relayinner_display.config import load_config
 from relayinner_display.input import LogindPowerButtonPolicyChecker
@@ -185,6 +187,21 @@ class BootstrapTests(unittest.TestCase):
             build_installed_seatd_command(),
             ["/usr/bin/seatd", "-g", "relayinner-display"],
         )
+
+    def test_host_binary_resolution_prefers_installed_path(self) -> None:
+        with patch(
+            "relayinner_display.bootstrap.which",
+            side_effect=lambda binary, path=None: {
+                "seatd": "/usr/sbin/seatd",
+                "seatd-launch": "/usr/bin/seatd-launch",
+                "cage": "/usr/bin/cage",
+            }.get(binary),
+        ):
+            self.assertEqual(resolve_host_binary("seatd", "/usr/bin/seatd"), "/usr/sbin/seatd")
+            self.assertEqual(
+                build_installed_seatd_command(),
+                ["/usr/sbin/seatd", "-g", "relayinner-display"],
+            )
 
     def test_rendered_services_include_required_units_and_restart_policy(self) -> None:
         daemon_unit = render_daemon_service()
