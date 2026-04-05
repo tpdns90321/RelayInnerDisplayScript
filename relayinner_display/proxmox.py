@@ -132,9 +132,10 @@ class ProxmoxClient:
         lines = ["[virt-viewer]"]
         for key, value in sorted(spice_config.items()):
             serialized_value = str(value)
-            if key == "delete-this-file":
-                continue
-            elif key == "proxy":
+            # if you want to debug this, uncomment below
+            # if key == "delete-this-file":
+            #     continue
+            if key == "proxy":
                 port = urlsplit(value).port
                 value = f"http://127.0.0.1:{port}"
             lines.append(f"{key}={serialized_value}")
