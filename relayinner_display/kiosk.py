@@ -9,7 +9,7 @@ import sys
 from .session import DEFAULT_CONFIG_PATH, build_session_env
 
 
-DEFAULT_SESSION_BINARY = "relayinner-display-session"
+DEFAULT_SESSION_BINARY = "/usr/local/lib/relayinner-display/relayinner-display-session"
 DEFAULT_ENTRYPOINT_PATH = "/usr/local/lib/relayinner-display/session-entrypoint"
 
 

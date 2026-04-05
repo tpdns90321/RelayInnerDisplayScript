@@ -54,6 +54,47 @@ class KioskTests(unittest.TestCase):
             },
         )
 
+    def test_entrypoint_uses_absolute_installed_session_launcher_without_path(self) -> None:
+        captured: dict[str, object] = {}
+
+        def fake_exec(program: str, argv: list[str], env: dict[str, str]) -> None:
+            captured["program"] = program
+            captured["argv"] = argv
+            captured["env"] = env
+
+        with patch.dict(
+            "os.environ",
+            {
+                "HOME": "/var/lib/relayinner-display",
+            },
+            clear=True,
+        ):
+            result = main(
+                ["--config", "/tmp/relay.toml"],
+                execvpe=fake_exec,
+            )
+
+        self.assertEqual(result, 0)
+        self.assertEqual(
+            captured["program"],
+            "/usr/local/lib/relayinner-display/relayinner-display-session",
+        )
+        self.assertEqual(
+            captured["argv"],
+            [
+                "/usr/local/lib/relayinner-display/relayinner-display-session",
+                "--config",
+                "/tmp/relay.toml",
+            ],
+        )
+        self.assertEqual(
+            captured["env"],
+            {
+                "HOME": "/var/lib/relayinner-display",
+                "XDG_SESSION_TYPE": "wayland",
+            },
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
