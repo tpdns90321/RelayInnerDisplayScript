@@ -268,6 +268,7 @@ class BootstrapTests(unittest.TestCase):
         )
         self.assertNotIn("seatd-launch", kiosk_unit)
         self.assertIn("SupplementaryGroups=video render", kiosk_unit)
+        self.assertIn("Environment=LIBSEAT_BACKEND=seatd", kiosk_unit)
         self.assertIn("TTYPath=/dev/tty1", kiosk_unit)
         self.assertNotIn("Environment=SEATD_SOCK=/run/seatd.sock", kiosk_unit)
         self.assertIn(f"StartLimitIntervalSec={SYSTEMD_START_LIMIT_INTERVAL_SEC}", kiosk_unit)

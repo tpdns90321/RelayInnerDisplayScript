@@ -49,6 +49,8 @@ If the kiosk journal shows `libseat` errors such as `Could not connect to socket
 
 If the kiosk journal shows `failed to open /dev/dri/renderD128: Permission denied`, `failed to open /dev/dri/card0: Permission denied`, or `Unable to create the wlroots renderer`, rerun `sudo ./install.sh` so the generated kiosk unit picks up the host DRM groups with `SupplementaryGroups=...`, typically `video render`.
 
+The kiosk unit also forces `LIBSEAT_BACKEND=seatd` so `cage` uses the same seatd backend that succeeded in transient `systemd-run` debugging instead of relying on libseat backend auto-selection.
+
 ## Uninstall
 
 To remove the relay appliance and return the host to its normal local-login path, run:

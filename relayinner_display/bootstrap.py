@@ -315,6 +315,7 @@ def render_kiosk_service(
         Environment=PATH={DEFAULT_PATH_ENV}
         Environment=XDG_RUNTIME_DIR=/run/relayinner-display/user-runtime
         Environment=XDG_SESSION_TYPE=wayland
+        Environment=LIBSEAT_BACKEND=seatd
         PermissionsStartOnly=true
         ExecStartPre=/usr/bin/install -d -o {SERVICE_USER} -g {SERVICE_GROUP} -m 0750 /run/relayinner-display
         ExecStartPre=/usr/bin/install -d -o {SERVICE_USER} -g {SERVICE_GROUP} -m 0700 /run/relayinner-display/user-runtime
