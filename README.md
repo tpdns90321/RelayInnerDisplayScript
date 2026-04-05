@@ -47,6 +47,8 @@ For the full operator procedure, package assumptions, managed paths, troubleshoo
 
 If the kiosk journal shows `libseat` errors such as `Could not connect to socket /run/seatd.sock: Permission denied`, `Could not open target tty: Permission denied`, or `Failed to start a DRM session`, refresh the installed units with `sudo ./install.sh` before debugging further. The current kiosk unit is expected to launch `cage -- /usr/local/lib/relayinner-display/session-entrypoint` while `relayinner-display-seatd.service` owns `/run/seatd.sock`; older installs that still wrap Cage with `seatd-launch` can exit immediately with `status=1`.
 
+If the kiosk journal shows `failed to open /dev/dri/renderD128: Permission denied`, `failed to open /dev/dri/card0: Permission denied`, or `Unable to create the wlroots renderer`, rerun `sudo ./install.sh` so the generated kiosk unit picks up the host DRM groups with `SupplementaryGroups=...`, typically `video render`.
+
 ## Uninstall
 
 To remove the relay appliance and return the host to its normal local-login path, run:
@@ -101,7 +103,7 @@ Current implementation coverage:
 - `relayinner_display.input` validates host `logind` power-key policy and captures `KEY_POWER` presses from one evdev node.
 - `relayinner_display.session` supervises `remote-viewer`, tracks waiting/degraded/display-sleeping session state, applies `wlopm`-style display-power actions from the Wayland session context, and emits subsystem-scoped session, console, and display logs.
 - `relayinner_display.kiosk` provides the Cage session entrypoint and the canonical `cage -- ...` command shape against the managed `relayinner-display-seatd.service`.
-- `relayinner_display.bootstrap` renders the sample config, systemd units, logind override, the Spec 15 `StartLimitIntervalSec=120` / `StartLimitBurst=5` restart-loop policy, the Spec 16 install-state record under `/var/lib/relayinner-display/install-state.json`, and the Spec 17 uninstall flow that restores `tty1` plus optional display-manager state conservatively.
+- `relayinner_display.bootstrap` renders the sample config, systemd units, logind override, host-detected DRM supplementary groups for the kiosk unit, the Spec 15 `StartLimitIntervalSec=120` / `StartLimitBurst=5` restart-loop policy, the Spec 16 install-state record under `/var/lib/relayinner-display/install-state.json`, and the Spec 17 uninstall flow that restores `tty1` plus optional display-manager state conservatively.
 - `tests/` now cover config parsing, IPC validation, Proxmox command handling, reconnect logic, daemon DPMS debounce behavior, Spec 15 state persistence, runtime dependency degradation, restart-threshold rendering, install-state persistence, uninstall fallback and purge behavior, session supervision, logind policy parsing, power-button handling, display-power handling, and kiosk entrypoint wiring.
 
 Operationally, the appliance is expected to move through a small state machine:

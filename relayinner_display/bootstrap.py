@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from shutil import copy2, copytree, ignore_patterns, rmtree, which
 from typing import Callable, Sequence
+import grp
 import json
 import os
 import pwd
@@ -151,11 +152,37 @@ CommandRunner = Callable[..., subprocess.CompletedProcess[str]]
 OutputWriter = Callable[[str], None]
 TimestampProvider = Callable[[], datetime]
 ServiceUserExistsChecker = Callable[[str], bool]
+GroupDetector = Callable[[], tuple[str, ...]]
 
 
 def resolve_host_binary(binary_name: str, default_path: str) -> str:
     resolved = which(binary_name, path=DEFAULT_PATH_ENV)
     return resolved or default_path
+
+
+def detect_drm_device_groups(device_dir: Path = Path("/dev/dri")) -> tuple[str, ...]:
+    groups: list[str] = []
+    seen: set[str] = set()
+    device_nodes = sorted(device_dir.glob("card*")) + sorted(device_dir.glob("renderD*"))
+
+    for device_node in device_nodes:
+        try:
+            device_gid = device_node.stat().st_gid
+        except OSError:
+            continue
+
+        try:
+            group_name = grp.getgrgid(device_gid).gr_name
+        except KeyError:
+            group_name = str(device_gid)
+
+        if group_name in seen:
+            continue
+
+        seen.add(group_name)
+        groups.append(group_name)
+
+    return tuple(groups)
 
 
 def render_sample_config() -> str:
@@ -260,8 +287,14 @@ def render_daemon_service(paths: HostInstallPaths = HostInstallPaths()) -> str:
     )
 
 
-def render_kiosk_service(paths: HostInstallPaths = HostInstallPaths()) -> str:
+def render_kiosk_service(
+    paths: HostInstallPaths = HostInstallPaths(),
+    supplementary_groups: Sequence[str] = (),
+) -> str:
     exec_start = shlex.join(build_installed_kiosk_command(paths))
+    supplementary_groups_line = ""
+    if supplementary_groups:
+        supplementary_groups_line = f"SupplementaryGroups={' '.join(supplementary_groups)}\n"
     return textwrap.dedent(
         f"""\
         [Unit]
@@ -276,6 +309,7 @@ def render_kiosk_service(paths: HostInstallPaths = HostInstallPaths()) -> str:
         Type=simple
         User={SERVICE_USER}
         Group={SERVICE_GROUP}
+        {supplementary_groups_line}\
         WorkingDirectory={paths.service_home}
         Environment=HOME={paths.service_home}
         Environment=PATH={DEFAULT_PATH_ENV}
@@ -336,6 +370,7 @@ class HostBootstrapInstaller:
         systemd_runtime_path: Path = SYSTEMD_RUNTIME_PATH,
         now_provider: TimestampProvider | None = None,
         service_user_exists_checker: ServiceUserExistsChecker | None = None,
+        kiosk_supplementary_groups_detector: GroupDetector | None = None,
     ) -> None:
         self.repo_root = repo_root.resolve()
         self.install_root = install_root.resolve()
@@ -346,6 +381,12 @@ class HostBootstrapInstaller:
         self.systemd_runtime_path = systemd_runtime_path
         self.now_provider = now_provider or (lambda: datetime.now(timezone.utc))
         self.service_user_exists_checker = service_user_exists_checker or self._lookup_service_user
+        if kiosk_supplementary_groups_detector is not None:
+            self.kiosk_supplementary_groups_detector = kiosk_supplementary_groups_detector
+        elif self.install_root == DEFAULT_STAGE_ROOT:
+            self.kiosk_supplementary_groups_detector = detect_drm_device_groups
+        else:
+            self.kiosk_supplementary_groups_detector = lambda: ()
 
     def install(
         self,
@@ -504,10 +545,15 @@ class HostBootstrapInstaller:
 
     def install_service_units(self) -> None:
         self.output(f"Installing systemd units into {self.paths.systemd_dir}")
+        kiosk_supplementary_groups = tuple(dict.fromkeys(self.kiosk_supplementary_groups_detector()))
+        if kiosk_supplementary_groups:
+            self.output("Detected kiosk DRM access groups: " + ", ".join(kiosk_supplementary_groups))
+        else:
+            self.output("WARNING: no DRM access groups detected under /dev/dri; Cage may fail to access the GPU")
         self._write_text(self._stage(self.paths.seatd_service_path), render_seatd_service(), mode=0o644)
         self._write_text(
             self._stage(self.paths.kiosk_service_path),
-            render_kiosk_service(self.paths),
+            render_kiosk_service(self.paths, supplementary_groups=kiosk_supplementary_groups),
             mode=0o644,
         )
         self._write_text(

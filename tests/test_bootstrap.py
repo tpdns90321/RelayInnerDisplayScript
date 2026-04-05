@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 import json
+import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import subprocess
@@ -22,6 +23,7 @@ from relayinner_display.bootstrap import (
     build_installed_daemon_command,
     build_installed_kiosk_command,
     build_installed_seatd_command,
+    detect_drm_device_groups,
     render_daemon_service,
     render_kiosk_service,
     render_seatd_service,
@@ -116,6 +118,7 @@ class BootstrapTests(unittest.TestCase):
             systemd_runtime_path=root / "run/systemd/system",
             now_provider=lambda: FIXED_INSTALL_TIME,
             service_user_exists_checker=lambda _: service_user_exists,
+            kiosk_supplementary_groups_detector=lambda: (),
         )
 
     def install_fixture(
@@ -162,6 +165,48 @@ class BootstrapTests(unittest.TestCase):
             checker = LogindPowerButtonPolicyChecker(main_configs=(), dropin_dirs=(override_dir,))
             checker.validate()
 
+    def test_detect_drm_device_groups_reads_unique_card_and_render_groups(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            device_dir = Path(temp_dir)
+            (device_dir / "card0").write_text("", encoding="utf-8")
+            (device_dir / "card1").write_text("", encoding="utf-8")
+            (device_dir / "renderD128").write_text("", encoding="utf-8")
+
+            gid_map = {
+                "card0": 44,
+                "card1": 44,
+                "renderD128": 104,
+            }
+            name_map = {
+                44: "video",
+                104: "render",
+            }
+            original_stat = Path.stat
+
+            def fake_stat(path: Path, *args: object, **kwargs: object) -> os.stat_result:
+                stat_result = original_stat(path, *args, **kwargs)
+                target_gid = gid_map.get(path.name, stat_result.st_gid)
+                return os.stat_result(
+                    (
+                        stat_result.st_mode,
+                        stat_result.st_ino,
+                        stat_result.st_dev,
+                        stat_result.st_nlink,
+                        stat_result.st_uid,
+                        target_gid,
+                        stat_result.st_size,
+                        stat_result.st_atime,
+                        stat_result.st_mtime,
+                        stat_result.st_ctime,
+                    )
+                )
+
+            with patch("pathlib.Path.stat", new=fake_stat), patch(
+                "relayinner_display.bootstrap.grp.getgrgid",
+                side_effect=lambda gid: type("grpentry", (), {"gr_name": name_map[gid]})(),
+            ):
+                self.assertEqual(detect_drm_device_groups(device_dir), ("video", "render"))
+
     def test_installed_commands_target_host_paths(self) -> None:
         paths = HostInstallPaths()
         self.assertEqual(
@@ -206,7 +251,7 @@ class BootstrapTests(unittest.TestCase):
 
     def test_rendered_services_include_required_units_and_restart_policy(self) -> None:
         daemon_unit = render_daemon_service()
-        kiosk_unit = render_kiosk_service()
+        kiosk_unit = render_kiosk_service(supplementary_groups=("video", "render"))
         seatd_unit = render_seatd_service()
 
         self.assertIn(
@@ -222,10 +267,38 @@ class BootstrapTests(unittest.TestCase):
             kiosk_unit,
         )
         self.assertNotIn("seatd-launch", kiosk_unit)
+        self.assertIn("SupplementaryGroups=video render", kiosk_unit)
         self.assertIn("TTYPath=/dev/tty1", kiosk_unit)
         self.assertNotIn("Environment=SEATD_SOCK=/run/seatd.sock", kiosk_unit)
         self.assertIn(f"StartLimitIntervalSec={SYSTEMD_START_LIMIT_INTERVAL_SEC}", kiosk_unit)
         self.assertIn(f"StartLimitBurst={SYSTEMD_START_LIMIT_BURST}", seatd_unit)
+
+    def test_install_writes_kiosk_unit_with_detected_drm_groups(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        runner = FakeRunner()
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            installer = HostBootstrapInstaller(
+                repo_root=repo_root,
+                install_root=root,
+                command_runner=runner,
+                output=lambda _: None,
+                pveversion_finder=lambda _: "/usr/bin/pveversion",
+                systemd_runtime_path=root / "run/systemd/system",
+                now_provider=lambda: FIXED_INSTALL_TIME,
+                service_user_exists_checker=lambda _: True,
+                kiosk_supplementary_groups_detector=lambda: ("video", "render"),
+            )
+
+            installer.install(
+                skip_host_validation=True,
+                skip_package_install=True,
+                replace_config=False,
+            )
+
+            kiosk_unit_path = root / "etc/systemd/system/relayinner-display-kiosk.service"
+            kiosk_unit = kiosk_unit_path.read_text(encoding="utf-8")
+            self.assertIn("SupplementaryGroups=video render", kiosk_unit)
 
     def test_validate_host_rejects_missing_proxmox_or_systemd(self) -> None:
         repo_root = Path(__file__).resolve().parents[1]
