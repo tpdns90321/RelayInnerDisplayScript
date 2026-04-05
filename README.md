@@ -207,6 +207,7 @@ After the project is installed, the intended flow is:
 5. If the VM is running, the guest appears fullscreen.
 6. If the VM is off, the display waits briefly and then sleeps.
 7. Pressing the host power button starts the VM when it is off, or requests graceful shutdown when it is on.
+   A start request wakes the display back to the waiting view immediately, even before Proxmox reports the VM as fully `running`.
 8. If a local dependency or repeated control-path failure occurs, the monitor stays on a controlled degraded view and the reason is visible in journald plus `/run/relayinner-display/daemon.state.json`.
 
 ## Notes

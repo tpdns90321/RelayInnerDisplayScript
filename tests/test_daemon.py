@@ -352,6 +352,58 @@ class DisplayDaemonTests(unittest.TestCase):
         self.assertFalse(daemon.state.power_button_action_in_flight)
         self.assertTrue(source.opened)
 
+    def test_power_button_start_wakes_display_while_vm_is_starting(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            config = build_config(Path(temp_dir), forward_power_button=True, debounce_ms=2000)
+            proxmox = FakeProxmoxClient(["stopped", "starting"])
+            source = FakePowerButtonSource([1])
+            daemon = DisplayDaemon(
+                config=config,
+                proxmox=proxmox,
+                power_button_source=source,
+                host_policy_checker=FakePolicyChecker(),
+            )
+            start_time = datetime(2026, 4, 4, 0, 0, tzinfo=timezone.utc)
+
+            daemon.prepare_runtime()
+            daemon.start(now=start_time)
+            daemon.session_ready = True
+            daemon.state.display_power_intent = "off"
+            daemon.state.display_power_applied = "off"
+            daemon.state.vm_power_state = "stopped"
+            daemon.state.session_state = SessionState.DISPLAY_SLEEPING
+
+            actions = daemon.tick(now=start_time)
+
+        self.assertEqual(actions, [{"type": "display_power", "state": "on", "output": ""}])
+        self.assertEqual(proxmox.start_calls, [101])
+        self.assertEqual(daemon.state.display_power_intent, "on")
+        self.assertEqual(daemon.state.session_state, SessionState.WAITING_FOR_VM)
+        self.assertTrue(daemon.state.power_button_action_in_flight)
+        self.assertEqual(daemon.state.last_power_button_result, "submitted")
+
+    def test_power_button_start_stays_in_flight_while_vm_is_starting(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            config = build_config(Path(temp_dir), forward_power_button=True, debounce_ms=2000)
+            proxmox = FakeProxmoxClient(["stopped", "starting", "starting"])
+            source = FakePowerButtonSource([1, 0])
+            daemon = DisplayDaemon(
+                config=config,
+                proxmox=proxmox,
+                power_button_source=source,
+                host_policy_checker=FakePolicyChecker(),
+            )
+            start_time = datetime(2026, 4, 4, 0, 0, tzinfo=timezone.utc)
+
+            daemon.prepare_runtime()
+            daemon.start(now=start_time)
+            daemon.tick(now=start_time)
+            daemon.tick(now=start_time + timedelta(milliseconds=2500))
+
+        self.assertEqual(proxmox.start_calls, [101])
+        self.assertTrue(daemon.state.power_button_action_in_flight)
+        self.assertEqual(daemon.state.last_power_button_result, "submitted")
+
     def test_power_button_press_requests_shutdown_for_running_vm(self) -> None:
         with TemporaryDirectory() as temp_dir:
             config = build_config(Path(temp_dir), forward_power_button=True)

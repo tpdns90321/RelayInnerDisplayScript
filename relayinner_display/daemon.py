@@ -349,6 +349,8 @@ class DisplayDaemon:
             return actions + actions_for_session + display_actions
 
         if not self._vm_can_show_console(vm_status):
+            if not self.console_running and self.state.display_power_intent == "on":
+                self._transition(self._waiting_session_state())
             self._persist_state()
             return actions + display_actions
 
@@ -524,12 +526,27 @@ class DisplayDaemon:
                 self.power_button_action_started_at is not None
                 and self._elapsed_ms(self.power_button_action_started_at, timestamp)
                 >= self.config.input.debounce_ms
+                and vm_status in POWER_BUTTON_STOPPED_VM_STATES
             ):
                 self.state.power_button_action_in_flight = False
                 self.state.last_power_button_result = "stalled"
                 self.power_button_action_started_at = None
                 self.input_logger.warning(
                     "In-flight power-button start action stalled in state=%s",
+                    vm_status,
+                )
+                return
+            if (
+                self.power_button_action_started_at is not None
+                and self._elapsed_ms(self.power_button_action_started_at, timestamp)
+                >= self.config.policy.shutdown_timeout_s * 1000
+                and vm_status not in POWER_BUTTON_STOPPED_VM_STATES
+            ):
+                self.state.power_button_action_in_flight = False
+                self.state.last_power_button_result = "timed_out"
+                self.power_button_action_started_at = None
+                self.input_logger.warning(
+                    "In-flight power-button start action timed out in state=%s",
                     vm_status,
                 )
                 return
@@ -670,6 +687,12 @@ class DisplayDaemon:
         return [self._display_power_message(target_intent)]
 
     def _desired_display_power_intent(self, now: datetime) -> str | None:
+        if (
+            self.state.power_button_action_in_flight
+            and self.state.last_power_button_action == "start"
+        ):
+            return "on"
+
         if self.state.vm_power_state in DISPLAY_ON_VM_STATES:
             self._startup_display_policy_pending = False
             return "on"
