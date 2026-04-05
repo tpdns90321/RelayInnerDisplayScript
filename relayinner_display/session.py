@@ -29,6 +29,7 @@ WAITING_STATUS_TEXT = {
 }
 DISPLAY_SLEEPING_STATUS = "Display sleeping"
 DEFAULT_WAITING_STATUS = WAITING_STATUS_TEXT["vm_stopped"]
+WLR_RANDR_HELPER = "wlr-randr"
 SESSION_ENV_ALLOWLIST = {
     "DBUS_SESSION_BUS_ADDRESS",
     "HOME",
@@ -51,6 +52,30 @@ def build_session_env(source_env: Mapping[str, str] | None = None) -> dict[str, 
 
 def subsystem_logger(namespace: str, subsystem: str) -> logging.Logger:
     return logging.getLogger(f"{namespace}.{subsystem}")
+
+
+def display_power_helper_name(helper: str) -> str:
+    return Path(helper).name or helper
+
+
+def parse_wlr_randr_outputs(output: str) -> list[str]:
+    outputs: list[str] = []
+    seen: set[str] = set()
+
+    for line in output.splitlines():
+        if not line or line[:1].isspace():
+            continue
+
+        name = line.split(maxsplit=1)[0]
+        if not name or any(not (char.isalnum() or char in "-._") for char in name):
+            continue
+        if name in seen:
+            continue
+
+        seen.add(name)
+        outputs.append(name)
+
+    return outputs
 
 
 @dataclass
@@ -256,9 +281,78 @@ class SessionSupervisor:
             self._refresh_view_state()
 
     def _apply_display_power(self, state: str, output: str) -> list[dict[str, object]]:
+        if display_power_helper_name(self.power_helper) == WLR_RANDR_HELPER:
+            return self._apply_wlr_randr_display_power(state=state, output=output)
+        return self._apply_generic_display_power(state=state, output=output)
+
+    def _apply_generic_display_power(self, state: str, output: str) -> list[dict[str, object]]:
         target_output = output.strip() or "*"
         command = [self.power_helper, "--on" if state == "on" else "--off", target_output]
+        completed = self._run_power_helper_command(
+            command,
+            context=f"for state={state} output={target_output}",
+        )
+        if completed is None:
+            return []
 
+        self.view_state.display_power_state = state
+        self._refresh_view_state()
+        self.display_logger.info(
+            "Display power applied: state=%s output=%s helper=%s",
+            state,
+            target_output,
+            self.power_helper,
+        )
+        return [{"type": "display_power_applied", "state": state}]
+
+    def _apply_wlr_randr_display_power(self, state: str, output: str) -> list[dict[str, object]]:
+        target_outputs = self._resolve_wlr_randr_outputs(output)
+        if not target_outputs:
+            return []
+
+        for target_output in target_outputs:
+            command = [self.power_helper, "--output", target_output, "--on" if state == "on" else "--off"]
+            completed = self._run_power_helper_command(
+                command,
+                context=f"for state={state} output={target_output}",
+            )
+            if completed is None:
+                return []
+
+        self.view_state.display_power_state = state
+        self._refresh_view_state()
+        applied_outputs = ",".join(target_outputs)
+        self.display_logger.info(
+            "Display power applied: state=%s output=%s helper=%s",
+            state,
+            applied_outputs,
+            self.power_helper,
+        )
+        return [{"type": "display_power_applied", "state": state}]
+
+    def _resolve_wlr_randr_outputs(self, output: str) -> list[str]:
+        target_output = output.strip()
+        if target_output:
+            return [target_output]
+
+        command = [self.power_helper]
+        completed = self._run_power_helper_command(command, context="while listing outputs")
+        if completed is None:
+            return []
+
+        outputs = parse_wlr_randr_outputs(completed.stdout or "")
+        if not outputs:
+            self.display_logger.error("Display power helper reported no outputs to control")
+            return []
+
+        return outputs
+
+    def _run_power_helper_command(
+        self,
+        command: list[str],
+        *,
+        context: str,
+    ) -> subprocess.CompletedProcess[str] | None:
         try:
             completed = self.power_command_runner(
                 command,
@@ -269,24 +363,20 @@ class SessionSupervisor:
             )
         except OSError as exc:
             self.display_logger.error("Display power helper failed to start: %s", exc)
-            return []
+            return None
 
         if completed.returncode != 0:
             helper_output = (completed.stderr or completed.stdout or "").strip()
             suffix = f": {helper_output}" if helper_output else ""
             self.display_logger.error(
-                "Display power helper exited with %s for state=%s output=%s%s",
+                "Display power helper exited with %s %s%s",
                 completed.returncode,
-                state,
-                target_output,
+                context,
                 suffix,
             )
-            return []
+            return None
 
-        self.view_state.display_power_state = state
-        self._refresh_view_state()
-        self.display_logger.info("Display power applied: state=%s output=%s", state, target_output)
-        return [{"type": "display_power_applied", "state": state}]
+        return completed
 
     def _refresh_view_state(self) -> None:
         self.view_state.console_active = self.viewer_process is not None

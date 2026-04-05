@@ -13,7 +13,7 @@ This MVP supports one deployment path: direct installation onto a Proxmox VE hos
   - `cage`
   - `seatd`
   - `virt-viewer`
-  - `wlopm`
+  - `wlr-randr`
 
 ## Install
 
@@ -22,7 +22,7 @@ This MVP supports one deployment path: direct installation onto a Proxmox VE hos
 3. Edit `/etc/relayinner-display/config.toml` and set at least:
    - `[target].vmid`
    - `[target].node_name`
-   - `[display].output_name` if you want to pin a specific connector name
+   - `[display].output_name` if you want to pin a specific connector name; this is recommended when the default `wlr-randr` helper should target one physical connector only
    - `[input].power_button_event` if the default evdev path does not match the host
 4. Start the services after editing the config:
 
@@ -174,5 +174,7 @@ The managed kiosk unit also exports `LIBSEAT_BACKEND=seatd` so `cage` uses the s
 If `systemctl status relayinner-display-kiosk.service` briefly shows the child process as `/usr/bin/python3 /usr/local/lib/relayinner-display/session-entrypoint` before `cage` exits with `status=1`, the installed runtime is likely older than the absolute-path launcher hotfix. Refresh `/usr/local/lib/relayinner-display/relayinner_display/kiosk.py` with `sudo ./install.sh`; older copies tried to exec `relayinner-display-session` by bare name, which fails when `cage` does not preserve the kiosk unit `PATH`.
 
 If `runuser -u relayinner-display -- /usr/local/lib/relayinner-display/session-entrypoint` or the kiosk journal shows `PermissionError: [Errno 13] Permission denied: '/etc/relayinner-display/config.toml'`, the session user cannot read the preserved host config. Refresh the install with `sudo ./install.sh`; the current installer normalizes `/etc/relayinner-display/` to service-group-readable permissions so the unprivileged kiosk session can load the same config as the root daemon.
+
+If the display helper logs `Wayland server does not support wlr-output-power-management-v1`, the host is still configured for `wlopm`. Cage supports output management through `wlr-randr` more broadly than it supports the `wlopm` protocol, so rerun `sudo ./install.sh` and keep `power_helper = "wlr-randr"` unless you have confirmed `wlopm` support on that compositor build.
 
 If the daemon logs `Prepared SPICE config for VM ...` and `remote-viewer started with pid=...` but the viewer immediately closes with a dialog like `Unable to connect graphic server /run/relayinner-display/current.vv`, inspect the generated `.vv` file. Proxmox returns the `ca` certificate with escaped newlines, and the relay writer must keep that value escaped on a single `ca=...` line; literal embedded newlines break the INI format and can cause `remote-viewer` to fail before the SPICE session opens.

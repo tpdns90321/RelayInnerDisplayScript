@@ -651,7 +651,7 @@ class BootstrapTests(unittest.TestCase):
     def test_required_packages_match_spec(self) -> None:
         self.assertEqual(
             REQUIRED_PACKAGES,
-            ("python3", "python3-evdev", "cage", "seatd", "virt-viewer", "wlopm"),
+            ("python3", "python3-evdev", "cage", "seatd", "virt-viewer", "wlr-randr"),
         )
 
 

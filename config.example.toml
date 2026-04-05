@@ -26,7 +26,7 @@ shutdown_timeout_s = 90
 
 [display]
 output_name = ""
-power_helper = "wlopm"
+power_helper = "wlr-randr"
 
 [input]
 power_button_event = "/dev/input/by-path/platform-i8042-serio-0-event-power"

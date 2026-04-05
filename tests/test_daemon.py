@@ -539,7 +539,7 @@ def build_config(
     root: Path,
     *,
     output_name: str = "",
-    power_helper: str = "wlopm",
+    power_helper: str = "wlr-randr",
     dpms_off_delay_ms: int = 5000,
     power_state_stabilize_ms: int = 3000,
     forward_power_button: bool = False,

@@ -47,7 +47,7 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.policy.dpms_off_delay_ms, 5000)
         self.assertEqual(config.policy.power_state_stabilize_ms, 3000)
         self.assertEqual(config.display.output_name, "")
-        self.assertEqual(config.display.power_helper, "wlopm")
+        self.assertEqual(config.display.power_helper, "wlr-randr")
         self.assertFalse(config.input.forward_power_button)
         self.assertEqual(config.input.debounce_ms, 2000)
         self.assertEqual(config.policy.power_button_action_when_running, "shutdown")

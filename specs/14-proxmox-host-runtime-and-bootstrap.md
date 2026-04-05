@@ -50,7 +50,7 @@ Required host packages:
 - `cage`
 - `seatd`
 - `virt-viewer`
-- `wlopm`
+- `wlr-randr`
 
 Managed filesystem layout:
 

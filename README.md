@@ -28,7 +28,7 @@ Use this install path only on a Proxmox VE host with `systemd`, a directly attac
 3. Edit `/etc/relayinner-display/config.toml` and set at least:
    - `[target].vmid`
    - `[target].node_name`
-   - `[display].output_name` if you want to pin a specific connector name
+   - `[display].output_name` if you want to pin a specific connector name; this is recommended when using the default `wlr-randr` helper on hosts with more than one connector
    - `[input].power_button_event` if the default evdev path does not match the host
 4. Restart the relay services after editing the config:
 
@@ -54,6 +54,8 @@ The kiosk unit also forces `LIBSEAT_BACKEND=seatd` so `cage` uses the same seatd
 If `systemctl status relayinner-display-kiosk.service` shows `cage` starting and then failing a few seconds later while the child process is still `/usr/bin/python3 /usr/local/lib/relayinner-display/session-entrypoint`, refresh the installed runtime with `sudo ./install.sh`. Older installs can still carry the pre-hotfix `relayinner_display/kiosk.py` that tried to exec `relayinner-display-session` by bare name; when `cage` drops `PATH`, that launcher exits immediately and systemd records `status=1`.
 
 If the kiosk journal or a direct `runuser -u relayinner-display -- /usr/local/lib/relayinner-display/session-entrypoint` test shows `PermissionError: [Errno 13] Permission denied: '/etc/relayinner-display/config.toml'`, rerun `sudo ./install.sh` so the installer refreshes `/etc/relayinner-display/` and `config.toml` with relay-group-readable permissions. The session process runs as `relayinner-display`, so the config must be readable by that service group even when the content is preserved across installs.
+
+If display sleep or wake fails and the kiosk journal shows `Wayland server does not support wlr-output-power-management-v1`, the host is still using an older `power_helper = "wlopm"` setting. Cage reliably supports output changes through `wlr-randr`, not the `wlopm` protocol on all versions, so refresh the install with `sudo ./install.sh` and keep the default `power_helper = "wlr-randr"` unless you have verified compositor-side `wlopm` support.
 
 If `remote-viewer` starts and then exits with a generic dialog such as `Unable to connect graphic server /run/relayinner-display/current.vv`, verify the generated `.vv` file keeps certificate and other multiline values on one escaped line. Proxmox returns the SPICE `ca` field with embedded `\n` escapes; writing that back as literal newlines corrupts the INI-style `.vv` file and can make `remote-viewer` fail immediately even though `pvesh ... spiceproxy` succeeded.
 
@@ -109,7 +111,7 @@ Current implementation coverage:
 - `relayinner_display.proxmox` wraps local `qm` and `pvesh` calls, writes `remote-viewer` `.vv` files, and submits guest start/shutdown requests.
 - `relayinner_display.daemon` now owns the end-to-end appliance state machine, validates required runtime binaries, degrades after repeated local Proxmox failures, captures host power-button intent, and writes the Spec 15 runtime state contract to disk.
 - `relayinner_display.input` validates host `logind` power-key policy and captures `KEY_POWER` presses from one evdev node.
-- `relayinner_display.session` supervises `remote-viewer`, tracks waiting/degraded/display-sleeping session state, applies `wlopm`-style display-power actions from the Wayland session context, and emits subsystem-scoped session, console, and display logs.
+- `relayinner_display.session` supervises `remote-viewer`, tracks waiting/degraded/display-sleeping session state, applies Wayland display-power actions through `wlr-randr` by default while preserving custom helper support, and emits subsystem-scoped session, console, and display logs.
 - `relayinner_display.kiosk` provides the Cage session entrypoint and the canonical `cage -- ...` command shape against the managed `relayinner-display-seatd.service`.
 - `relayinner_display.bootstrap` renders the sample config, systemd units, logind override, host-detected DRM supplementary groups for the kiosk unit, the Spec 15 `StartLimitIntervalSec=120` / `StartLimitBurst=5` restart-loop policy, the Spec 16 install-state record under `/var/lib/relayinner-display/install-state.json`, and the Spec 17 uninstall flow that restores `tty1` plus optional display-manager state conservatively.
 - `tests/` now cover config parsing, IPC validation, Proxmox command handling, reconnect logic, daemon DPMS debounce behavior, Spec 15 state persistence, runtime dependency degradation, restart-threshold rendering, install-state persistence, uninstall fallback and purge behavior, session supervision, logind policy parsing, power-button handling, display-power handling, and kiosk entrypoint wiring.
@@ -156,7 +158,7 @@ The MVP spec currently assumes these host-side packages or equivalents:
 - `cage`
 - `seatd`
 - `virt-viewer`
-- `wlopm`
+- `wlr-randr`
 
 The current implementation now manages:
 

@@ -44,7 +44,7 @@ class RuntimeConfig:
 @dataclass(frozen=True)
 class DisplayConfig:
     output_name: str = ""
-    power_helper: str = "wlopm"
+    power_helper: str = "wlr-randr"
 
 
 @dataclass(frozen=True)
@@ -150,7 +150,7 @@ def parse_config(raw: dict[str, Any]) -> AppConfig:
 
     display = DisplayConfig(
         output_name=_optional_string(display_table, "output_name", default=""),
-        power_helper=_optional_non_empty_string(display_table, "power_helper", default="wlopm"),
+        power_helper=_optional_non_empty_string(display_table, "power_helper", default="wlr-randr"),
     )
 
     input_config = InputConfig(

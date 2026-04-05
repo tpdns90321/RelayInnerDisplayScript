@@ -36,7 +36,7 @@ Config additions in `/etc/relayinner-display/config.toml`:
 ```toml
 [display]
 output_name = "HDMI-A-1"
-power_helper = "wlopm"
+power_helper = "wlr-randr"
 
 [policy]
 dpms_policy = "vm-power"
@@ -61,9 +61,9 @@ Daemon-to-session messages:
 
 Session execution contract:
 
-- Default helper is `wlopm`.
+- Default helper is `wlr-randr`.
 - The helper is executed from the Wayland session environment.
-- If `output_name` is empty, apply the action to all visible outputs.
+- If `output_name` is empty, apply the action to all discoverable outputs.
 
 Debounce rules:
 
@@ -146,11 +146,11 @@ This spec extends the shared config file with `[display]` and new `[policy]` key
 - `dpms_off_delay_ms = 5000`
 - `power_state_stabilize_ms = 3000`
 
-Future implementations may support alternative Wayland output-power helpers, but they must preserve the same `display_on` and `display_off` semantics for compatibility.
+Alternative Wayland output-power helpers, including `wlopm` where the compositor supports it, must preserve the same `display_on` and `display_off` semantics for compatibility.
 
 ## Open questions
 
-- Whether `wlopm` behaves consistently enough across the Proxmox host environments targeted for MVP.
+- Whether disabling or enabling outputs through `wlr-randr` behaves consistently enough across the Proxmox host environments targeted for MVP.
 - Whether some monitors require a second wake attempt after a long standby interval.
 - Whether `paused` should remain display-on for all operator profiles or become configurable later.
 

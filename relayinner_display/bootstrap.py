@@ -29,7 +29,7 @@ REQUIRED_PACKAGES = (
     "cage",
     "seatd",
     "virt-viewer",
-    "wlopm",
+    "wlr-randr",
 )
 REQUIRED_SERVICES = (
     "relayinner-display-seatd.service",
@@ -218,7 +218,7 @@ def render_sample_config() -> str:
 
         [display]
         output_name = ""
-        power_helper = "wlopm"
+        power_helper = "wlr-randr"
 
         [input]
         power_button_event = "/dev/input/by-path/platform-i8042-serio-0-event-power"
