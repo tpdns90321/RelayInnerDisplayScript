@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import ipaddress
 from pathlib import Path
+import re
 from typing import Any
 import tomllib
 
 
-SUPPORTED_CONSOLE_BACKENDS = {"spice", "vnc", "looking-glass"}
+SUPPORTED_CONSOLE_BACKENDS = {"spice", "vnc", "looking-glass", "moonlight"}
 SUPPORTED_VNC_BIND_HOSTS = {"127.0.0.1", "localhost"}
 SUPPORTED_VNC_VIEWERS = {"remote-viewer"}
 SUPPORTED_LOOKING_GLASS_RENDERERS = {"auto", "egl", "opengl"}
@@ -23,7 +25,13 @@ DEFAULT_VNC_BIND_HOST = "127.0.0.1"
 DEFAULT_VNC_VIEWER = "remote-viewer"
 DEFAULT_LOOKING_GLASS_BINARY = "looking-glass-client"
 DEFAULT_LOOKING_GLASS_RENDERER = "auto"
+DEFAULT_MOONLIGHT_BINARY = "moonlight"
+DEFAULT_MOONLIGHT_BASE_PORT = 47989
+DEFAULT_MOONLIGHT_APP = "Desktop"
+DEFAULT_MOONLIGHT_STATE_DIR = Path("/var/lib/relayinner-display/moonlight")
 MAX_VNC_DISPLAY_NUMBER = 65535 - 5900
+MAX_PORT_NUMBER = 65535
+HOSTNAME_LABEL_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$")
 
 
 class ConfigError(ValueError):
@@ -124,11 +132,44 @@ class ConsoleLookingGlassConfig:
 
 
 @dataclass(frozen=True)
+class ConsoleMoonlightConfig:
+    host: str
+    binary: str = DEFAULT_MOONLIGHT_BINARY
+    base_port: int = DEFAULT_MOONLIGHT_BASE_PORT
+    app: str = DEFAULT_MOONLIGHT_APP
+    state_dir: Path = DEFAULT_MOONLIGHT_STATE_DIR
+    quit_app_after_session: bool = False
+
+    @property
+    def host_authority(self) -> str:
+        return _render_moonlight_host_authority(self.host, self.base_port)
+
+    @property
+    def portable_marker_path(self) -> Path:
+        return self.state_dir / "portable.dat"
+
+    @property
+    def argv(self) -> list[str]:
+        argv = [
+            self.binary,
+            "stream",
+            self.host_authority,
+            self.app,
+            "--display-mode",
+            "fullscreen",
+        ]
+        if self.quit_app_after_session:
+            argv.append("--quit-app-after")
+        return argv
+
+
+@dataclass(frozen=True)
 class ConsoleConfig:
     artifact_dir: Path
     spice: ConsoleSpiceConfig | None = None
     vnc: ConsoleVncConfig | None = None
     looking_glass: ConsoleLookingGlassConfig | None = None
+    moonlight: ConsoleMoonlightConfig | None = None
 
 
 @dataclass(frozen=True)
@@ -400,16 +441,18 @@ def _parse_console_config(
     legacy_spice_vv_path: Path | None = None,
 ) -> ConsoleConfig:
     artifact_dir = _optional_absolute_path(table, "artifact_dir", default=DEFAULT_CONSOLE_ARTIFACT_DIR)
-    allowed_console_keys = {"artifact_dir", "spice", "vnc", "looking_glass"}
+    allowed_console_keys = {"artifact_dir", "spice", "vnc", "looking_glass", "moonlight"}
     _require_subset_keys(table, "console", allowed_console_keys)
 
     spice_block = _optional_table(table, "spice")
     vnc_block = _optional_table(table, "vnc")
     looking_glass_block = _optional_table(table, "looking_glass")
+    moonlight_block = _optional_table(table, "moonlight")
 
     if backend == "spice":
         _require_empty_table(looking_glass_block, backend, "console.looking_glass")
         _require_empty_table(vnc_block, backend, "console.vnc")
+        _require_empty_table(moonlight_block, backend, "console.moonlight")
         _require_only_keys(spice_block, {"vv_path"}, "console.spice")
 
         if spice_block:
@@ -424,6 +467,7 @@ def _parse_console_config(
     if backend == "vnc":
         _require_empty_table(spice_block, backend, "console.spice")
         _require_empty_table(looking_glass_block, backend, "console.looking_glass")
+        _require_empty_table(moonlight_block, backend, "console.moonlight")
         _require_only_keys(vnc_block, {"bind_host", "display_number", "viewer"}, "console.vnc")
 
         bind_host = _optional_non_empty_string(
@@ -454,50 +498,100 @@ def _parse_console_config(
             ),
         )
 
+    if backend == "looking-glass":
+        _require_empty_table(spice_block, backend, "console.spice")
+        _require_empty_table(vnc_block, backend, "console.vnc")
+        _require_empty_table(moonlight_block, backend, "console.moonlight")
+        _require_only_keys(
+            looking_glass_block,
+            {
+                "binary",
+                "shm_file",
+                "renderer",
+                "fullscreen",
+                "disable_host_screensaver",
+                "spice_enabled",
+            },
+            "console.looking_glass",
+        )
+
+        renderer = _optional_non_empty_string(
+            looking_glass_block,
+            "renderer",
+            default=DEFAULT_LOOKING_GLASS_RENDERER,
+        )
+        if renderer not in SUPPORTED_LOOKING_GLASS_RENDERERS:
+            supported = ", ".join(sorted(SUPPORTED_LOOKING_GLASS_RENDERERS))
+            raise ConfigError(
+                "Unsupported console.looking_glass.renderer="
+                f"{renderer!r}; supported values: {supported}"
+            )
+
+        return ConsoleConfig(
+            artifact_dir=artifact_dir,
+            looking_glass=ConsoleLookingGlassConfig(
+                binary=_optional_non_empty_string(
+                    looking_glass_block,
+                    "binary",
+                    default=DEFAULT_LOOKING_GLASS_BINARY,
+                ),
+                shm_file=_require_absolute_path(looking_glass_block, "shm_file"),
+                renderer=renderer,
+                fullscreen=_optional_bool(looking_glass_block, "fullscreen", default=True),
+                disable_host_screensaver=_optional_bool(
+                    looking_glass_block,
+                    "disable_host_screensaver",
+                    default=True,
+                ),
+                spice_enabled=_optional_bool(looking_glass_block, "spice_enabled", default=True),
+            ),
+        )
+
     _require_empty_table(spice_block, backend, "console.spice")
     _require_empty_table(vnc_block, backend, "console.vnc")
+    _require_empty_table(looking_glass_block, backend, "console.looking_glass")
     _require_only_keys(
-        looking_glass_block,
+        moonlight_block,
         {
             "binary",
-            "shm_file",
-            "renderer",
-            "fullscreen",
-            "disable_host_screensaver",
-            "spice_enabled",
+            "host",
+            "base_port",
+            "app",
+            "state_dir",
+            "quit_app_after_session",
         },
-        "console.looking_glass",
+        "console.moonlight",
     )
-
-    renderer = _optional_non_empty_string(
-        looking_glass_block,
-        "renderer",
-        default=DEFAULT_LOOKING_GLASS_RENDERER,
-    )
-    if renderer not in SUPPORTED_LOOKING_GLASS_RENDERERS:
-        supported = ", ".join(sorted(SUPPORTED_LOOKING_GLASS_RENDERERS))
-        raise ConfigError(
-            "Unsupported console.looking_glass.renderer="
-            f"{renderer!r}; supported values: {supported}"
-        )
 
     return ConsoleConfig(
         artifact_dir=artifact_dir,
-        looking_glass=ConsoleLookingGlassConfig(
-            binary=_optional_non_empty_string(
-                looking_glass_block,
+        moonlight=ConsoleMoonlightConfig(
+            binary=_optional_command_or_absolute_path(
+                moonlight_block,
                 "binary",
-                default=DEFAULT_LOOKING_GLASS_BINARY,
+                default=DEFAULT_MOONLIGHT_BINARY,
             ),
-            shm_file=_require_absolute_path(looking_glass_block, "shm_file"),
-            renderer=renderer,
-            fullscreen=_optional_bool(looking_glass_block, "fullscreen", default=True),
-            disable_host_screensaver=_optional_bool(
-                looking_glass_block,
-                "disable_host_screensaver",
-                default=True,
+            host=_require_moonlight_host(moonlight_block, "host"),
+            base_port=_optional_port(
+                moonlight_block,
+                "base_port",
+                default=DEFAULT_MOONLIGHT_BASE_PORT,
             ),
-            spice_enabled=_optional_bool(looking_glass_block, "spice_enabled", default=True),
+            app=_optional_non_empty_string(
+                moonlight_block,
+                "app",
+                default=DEFAULT_MOONLIGHT_APP,
+            ),
+            state_dir=_optional_absolute_path(
+                moonlight_block,
+                "state_dir",
+                default=DEFAULT_MOONLIGHT_STATE_DIR,
+            ),
+            quit_app_after_session=_optional_bool(
+                moonlight_block,
+                "quit_app_after_session",
+                default=False,
+            ),
         ),
     )
 
@@ -536,6 +630,60 @@ def _require_vnc_display_number(table: dict[str, Any], key: str) -> int:
             f"{key!r} must be <= {MAX_VNC_DISPLAY_NUMBER} so the derived VNC port stays <= 65535"
         )
     return value
+
+
+def _optional_port(table: dict[str, Any], key: str, default: int) -> int:
+    value = table.get(key, default)
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ConfigError(f"Missing or invalid positive integer value for {key!r}")
+    if value > MAX_PORT_NUMBER:
+        raise ConfigError(f"{key!r} must be <= {MAX_PORT_NUMBER}")
+    return value
+
+
+def _optional_command_or_absolute_path(table: dict[str, Any], key: str, default: str) -> str:
+    value = _optional_non_empty_string(table, key, default=default).strip()
+    path = Path(value)
+    if path.is_absolute():
+        return value
+    if path.name != value:
+        raise ConfigError(f"{key!r} must be a bare executable name or an absolute path")
+    return value
+
+
+def _require_moonlight_host(table: dict[str, Any], key: str) -> str:
+    value = _require_non_empty_string(table, key).strip()
+    if "://" in value or "/" in value:
+        raise ConfigError(f"{key!r} must be a hostname or IP literal without a URL scheme")
+    if value.startswith("[") or value.endswith("]"):
+        raise ConfigError(f"{key!r} must not include IPv6 brackets")
+    if any(character.isspace() for character in value):
+        raise ConfigError(f"{key!r} must not contain whitespace")
+
+    try:
+        ipaddress.ip_address(value)
+        return value
+    except ValueError:
+        pass
+
+    labels = value.split(".")
+    if any(not label or not HOSTNAME_LABEL_RE.fullmatch(label) for label in labels):
+        raise ConfigError(f"{key!r} must be a valid hostname or IP literal")
+    return value
+
+
+def _render_moonlight_host_authority(host: str, base_port: int) -> str:
+    if base_port == DEFAULT_MOONLIGHT_BASE_PORT:
+        return host
+
+    try:
+        host_ip = ipaddress.ip_address(host)
+    except ValueError:
+        host_ip = None
+
+    if host_ip is not None and host_ip.version == 6:
+        return f"[{host}]:{base_port}"
+    return f"{host}:{base_port}"
 
 
 def _require_child_path(root: Path, child: Path, label: str) -> None:

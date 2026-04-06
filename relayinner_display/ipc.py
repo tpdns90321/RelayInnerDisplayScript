@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from numbers import Integral
+from pathlib import Path
 from typing import Any, Callable, Mapping
 import json
 
@@ -26,6 +27,10 @@ def _is_string(value: object) -> bool:
 
 def _is_string_list(value: object) -> bool:
     return isinstance(value, list) and bool(value) and all(_is_non_empty_string(item) for item in value)
+
+
+def _is_absolute_path_string(value: object) -> bool:
+    return isinstance(value, str) and bool(value.strip()) and Path(value).is_absolute()
 
 
 def _is_power_state(value: object) -> bool:
@@ -58,6 +63,10 @@ SESSION_TO_DAEMON_OPTIONAL_FIELDS: dict[str, dict[str, Validator]] = {
     "console_exited": {"backend": _is_non_empty_string},
 }
 
+DAEMON_TO_SESSION_OPTIONAL_FIELDS: dict[str, dict[str, Validator]] = {
+    "connect_console": {"cwd": _is_absolute_path_string},
+}
+
 
 def encode_message(message: Mapping[str, object]) -> bytes:
     return (json.dumps(dict(message), separators=(",", ":"), sort_keys=True) + "\n").encode(
@@ -88,7 +97,12 @@ def decode_message(line: str | bytes) -> dict[str, Any]:
 
 
 def validate_daemon_message(message: Mapping[str, object]) -> dict[str, Any]:
-    return _validate_message(message, DAEMON_TO_SESSION_FIELDS, "daemon")
+    return _validate_message(
+        message,
+        DAEMON_TO_SESSION_FIELDS,
+        "daemon",
+        optional_schema=DAEMON_TO_SESSION_OPTIONAL_FIELDS,
+    )
 
 
 def validate_session_message(message: Mapping[str, object]) -> dict[str, Any]:

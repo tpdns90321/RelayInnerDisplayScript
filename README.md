@@ -2,11 +2,11 @@
 
 RelayInnerDisplayScript is a Proxmox-hosted display relay project for a single KVM guest.
 
-The target outcome is a small appliance-like runtime that takes one VM managed by Proxmox and mirrors it directly onto a monitor attached to the Proxmox host. The host should boot into a kiosk session, show the guest through SPICE or loopback-only VNC with `remote-viewer` or through Looking Glass with `looking-glass-client`, sleep or wake the monitor based on VM power state, and use the host power button as guest power control instead of shutting down the host.
+The target outcome is a small appliance-like runtime that takes one VM managed by Proxmox and mirrors it directly onto a monitor attached to the Proxmox host. The host should boot into a kiosk session, show the guest through SPICE or loopback-only VNC with `remote-viewer`, through Looking Glass with `looking-glass-client`, or through Moonlight with Linux `moonlight-qt`, sleep or wake the monitor based on VM power state, and use the host power button as guest power control instead of shutting down the host.
 
 ## Status
 
-This repository now includes Specs 10 through 17 of the current MVP plan, Specs 20 through 22 for the implemented console-backend expansion series, and Specs 30 through 32 for the next planned Moonlight client series.
+This repository now includes Specs 10 through 17 of the current MVP plan, Specs 20 through 22 for the implemented console-backend expansion series, and Spec 30 for the first implemented Moonlight client slice. Specs 31 and 32 remain planned.
 
 - The MVP architecture and behavior are defined in `./specs`.
 - Spec 10 now has a Python implementation for config loading, daemon/session IPC, local Proxmox command wrappers, SPICE `.vv` generation, and reconnect state handling.
@@ -20,12 +20,13 @@ This repository now includes Specs 10 through 17 of the current MVP plan, Specs 
 - Spec 20 now generalizes the shared config, runtime artifact layout, IPC, session launch path, and runtime state around a backend-neutral console contract while keeping existing SPICE behavior intact.
 - Spec 21 now implements the loopback-only Proxmox VNC backend, including config validation, `qm config` matching, endpoint probing, runtime `vnc_endpoint` state, and `remote-viewer` URI launch.
 - Spec 22 now implements the preflight-only Looking Glass backend, including config validation, shared-memory preflight, runtime `looking_glass_shm_file` state, and fullscreen `looking-glass-client` launch wiring.
-- Specs 30 through 32 now define the next Moonlight client series for Sunshine-backed guests: backend contract, persistent pair-assist workspace, and runtime launch/recovery behavior.
+- Spec 30 now implements the initial Moonlight backend contract for Sunshine-backed guests, including config validation, managed workspace preparation, `moonlight-qt` version gating, and fullscreen launch wiring through the existing kiosk/session model.
+- Specs 31 and 32 remain planned for Moonlight pair-assist, richer launch preflight, and operator-facing recovery behavior.
 - The current design still assumes direct installation on a Proxmox host, not an LXC container.
 
 ## Quickstart
 
-Use this install path only on a Proxmox VE host with `systemd`, a directly attached monitor, and one target guest that exposes either a SPICE display, an operator-prepared loopback-only VNC endpoint, or a fully operator-prepared Looking Glass guest.
+Use this install path only on a Proxmox VE host with `systemd`, a directly attached monitor, and one target guest that exposes either a SPICE display, an operator-prepared loopback-only VNC endpoint, a fully operator-prepared Looking Glass guest, or a Sunshine host reachable from the Proxmox host for Moonlight.
 
 1. Clone or copy this repository onto the Proxmox host and `cd` into the checkout.
 2. Run `sudo ./install.sh`.
@@ -35,6 +36,7 @@ Use this install path only on a Proxmox VE host with `systemd`, a directly attac
    - `[target].console_backend` if you are switching away from the default SPICE path
    - `[console.vnc].display_number` plus matching VM `args: -vnc 127.0.0.1:<display_number>` when using `console_backend = "vnc"`
    - `[console.looking_glass].shm_file` plus any renderer or SPICE overrides when using `console_backend = "looking-glass"`
+   - `[console.moonlight].host` plus any non-default `app`, `base_port`, or `state_dir` when using `console_backend = "moonlight"`
    - `[display].output_name` if you want to pin a specific connector name; this is recommended when using the default `wlr-randr` helper on hosts with more than one connector
    - `[input].power_button_event` if the default evdev path does not match the host
 4. Restart the relay services after editing the config:
@@ -70,6 +72,8 @@ If the appliance enters `degraded` with `backend=vnc`, verify that `qm config <v
 
 If the appliance enters `degraded` with `backend=looking-glass`, verify that `looking-glass-client` is installed, `[console.looking_glass].shm_file` already exists, and the file or device is readable by the `relayinner-display` session user. This backend is preflight-only support; GPU passthrough, KVMFR/IVSHMEM device creation, and guest host-app installation remain operator-managed. The upstream setup guidance lives at <https://looking-glass.io/docs/stable/requirements/> and <https://looking-glass.io/docs/stable/install_client/>.
 
+If the appliance enters `degraded` with `backend=moonlight`, verify that Linux `moonlight-qt` version `6.0.0` or newer is installed, `[console.moonlight].host` is set correctly, and the managed `state_dir` is writable by the relay session user. The current Spec 30 slice prepares the Moonlight workspace and launches `moonlight stream`, but Sunshine setup and any required pairing state inside that workspace remain operator-managed until Specs 31 and 32.
+
 ## Uninstall
 
 To remove the relay appliance and return the host to its normal local-login path, run:
@@ -91,7 +95,7 @@ For the detailed removal contract, best-effort fallback behavior, and post-unins
 ## MVP Goals
 
 - Relay one Proxmox VM to one host-attached display.
-- Use `Cage` as the kiosk shell and a curated console client: `remote-viewer` for SPICE or VNC, `looking-glass-client` for Looking Glass.
+- Use `Cage` as the kiosk shell and a curated console client: `remote-viewer` for SPICE or VNC, `looking-glass-client` for Looking Glass, or Linux `moonlight-qt` for Sunshine-backed guests.
 - Control the target VM locally with `qm` and `pvesh`.
 - Put the monitor into standby when the VM is off and wake it when the VM is active.
 - Map the host power button to guest start or graceful shutdown behavior.
@@ -118,14 +122,14 @@ The current MVP design assumes:
 
 Current implementation coverage:
 
-- `relayinner_display.config` now validates the shared TOML config model from Specs 10, 12, 13, 20, 21, and 22, including the backend-neutral `[console]` namespace, loopback-only VNC settings, Looking Glass preflight options, and legacy SPICE path compatibility.
+- `relayinner_display.config` now validates the shared TOML config model from Specs 10, 12, 13, 20, 21, 22, and 30, including the backend-neutral `[console]` namespace, loopback-only VNC settings, Looking Glass preflight options, Moonlight host/workspace config, and legacy SPICE path compatibility.
 - `relayinner_display.proxmox` wraps local `qm` and `pvesh` calls, writes `remote-viewer` `.vv` files, validates loopback-only VNC `qm config` exposure, probes the derived VNC socket, and submits guest start/shutdown requests.
-- `relayinner_display.daemon` now owns the end-to-end appliance state machine, validates required runtime binaries, emits backend-neutral `connect_console` IPC, prepares SPICE, VNC, or Looking Glass console launches, runs Looking Glass shared-memory preflight, degrades after repeated local Proxmox failures, captures host power-button intent, and writes the expanded runtime state contract to disk.
+- `relayinner_display.daemon` now owns the end-to-end appliance state machine, validates required runtime binaries, emits backend-neutral `connect_console` IPC, prepares SPICE, VNC, Looking Glass, or Moonlight console launches, runs Looking Glass shared-memory preflight, prepares the managed Moonlight workspace with `portable.dat`, enforces `moonlight-qt >= 6.0.0`, degrades after repeated local Proxmox failures, captures host power-button intent, and writes the expanded runtime state contract to disk.
 - `relayinner_display.input` validates host `logind` power-key policy and captures `KEY_POWER` presses from one evdev node.
-- `relayinner_display.session` now validates backend/launcher allowlists for generic console launches, keeps legacy `connect_spice` compatibility during the transition window, tracks waiting/degraded/display-sleeping session state, launches `looking-glass-client` on the same curated contract as `remote-viewer`, applies Wayland display-power actions through `wlr-randr` by default while preserving custom helper support, and emits subsystem-scoped session, console, and display logs.
+- `relayinner_display.session` now validates backend/launcher allowlists for generic console launches, keeps legacy `connect_spice` compatibility during the transition window, tracks waiting/degraded/display-sleeping session state, launches `looking-glass-client` or `moonlight` on the same curated contract as `remote-viewer`, honors daemon-provided working directories for managed backends, applies Wayland display-power actions through `wlr-randr` by default while preserving custom helper support, and emits subsystem-scoped session, console, and display logs.
 - `relayinner_display.kiosk` provides the Cage session entrypoint and the canonical `cage -- ...` command shape against the managed `relayinner-display-seatd.service`.
-- `relayinner_display.bootstrap` renders the sample config, systemd units, logind override, host-detected DRM supplementary groups for the kiosk unit, the Spec 15 `StartLimitIntervalSec=120` / `StartLimitBurst=5` restart-loop policy, the Spec 16 install-state record under `/var/lib/relayinner-display/install-state.json`, the Spec 22 Looking Glass sample config hints, and the Spec 17 uninstall flow that restores `tty1` plus optional display-manager state conservatively.
-- `tests/` now cover config parsing, backend-neutral IPC validation, Proxmox command handling, SPICE, VNC, and Looking Glass reconnect logic, daemon DPMS debounce behavior, runtime-state/backend handling including `vnc_endpoint` and `looking_glass_shm_file`, runtime dependency degradation, restart-threshold rendering, install-state persistence, uninstall fallback and purge behavior, session supervision, logind policy parsing, power-button handling, display-power handling, and kiosk entrypoint wiring.
+- `relayinner_display.bootstrap` renders the sample config, systemd units, logind override, host-detected DRM supplementary groups for the kiosk unit, the Spec 15 `StartLimitIntervalSec=120` / `StartLimitBurst=5` restart-loop policy, the Spec 16 install-state record under `/var/lib/relayinner-display/install-state.json`, the Spec 22 Looking Glass sample config hints, the Spec 30 Moonlight sample config hints, and the Spec 17 uninstall flow that restores `tty1` plus optional display-manager state conservatively.
+- `tests/` now cover config parsing, backend-neutral IPC validation including `cwd`, Proxmox command handling, SPICE, VNC, Looking Glass, and Moonlight launch/reconnect logic, daemon DPMS debounce behavior, Moonlight workspace/version validation, runtime-state/backend handling including `vnc_endpoint` and `looking_glass_shm_file`, runtime dependency degradation, restart-threshold rendering, install-state persistence, uninstall fallback and purge behavior, session supervision, logind policy parsing, power-button handling, display-power handling, and kiosk entrypoint wiring.
 
 Operationally, the appliance is expected to move through a small state machine:
 
@@ -175,7 +179,8 @@ Console-backend expansion status:
 
 - Wave 1 is complete: Spec 20 generalized the shared console contract without regressing SPICE.
 - Wave 2 is complete: Spec 21 now owns the shipped VNC path, and Spec 22 now ships the preflight-only Looking Glass path on the same shared contract.
-- Wave 3 is now specified: Specs 30 through 32 define the planned Moonlight client path for Sunshine-backed guests, but that series is not implemented yet.
+- Wave 3 has started: Spec 30 now ships the initial Moonlight backend contract and workspace baseline for Sunshine-backed guests.
+- Specs 31 and 32 remain planned for pair-assist, app-list validation, and richer Moonlight launch/ops behavior.
 
 ## Expected Host Dependencies
 
@@ -189,6 +194,8 @@ The MVP spec currently assumes these host-side packages or equivalents:
 - `wlr-randr`
 
 When `console_backend = "looking-glass"`, operators also need a working `looking-glass-client` install plus the upstream guest/passthrough prerequisites described at <https://looking-glass.io/docs/stable/requirements/> and <https://looking-glass.io/docs/stable/install_client/>. The relay does not automate those steps.
+
+When `console_backend = "moonlight"`, operators also need Linux `moonlight-qt` version `6.0.0` or newer plus a guest that already runs Sunshine. The relay prepares the managed Moonlight workspace and launches the client, but it does not yet automate Sunshine setup or pairing in this spec slice.
 
 The current implementation now manages:
 
@@ -217,8 +224,8 @@ The current implementation now manages:
 └── tasks/
 ```
 
-- `relayinner_display/` holds the current Python runtime for Specs 10 through 17 plus the Spec 20 shared console contract layer and the Spec 21/22 VNC and Looking Glass backends.
-- `config.example.toml` is the host bootstrap sample config installed by Specs 14, 16, 20, 21, and 22.
+- `relayinner_display/` holds the current Python runtime for Specs 10 through 17 plus the Spec 20 shared console contract layer, the Spec 21/22 VNC and Looking Glass backends, and the Spec 30 Moonlight backend contract layer.
+- `config.example.toml` is the host bootstrap sample config installed by Specs 14, 16, 20, 21, 22, and 30.
 - `docs/` holds operator-facing setup documentation for the host-direct install path.
 - `install.sh` is the idempotent host bootstrap entrypoint from Specs 14 and 16.
 - `uninstall.sh` is the safe removal entrypoint from Spec 17.

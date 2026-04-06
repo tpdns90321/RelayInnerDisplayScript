@@ -15,12 +15,16 @@ class IPCTests(unittest.TestCase):
     def test_encode_decode_round_trip(self) -> None:
         payload = {
             "type": "connect_console",
-            "backend": "spice",
-            "launcher": "remote-viewer",
+            "backend": "moonlight",
+            "launcher": "moonlight",
+            "cwd": "/var/lib/relayinner-display/moonlight",
             "argv": [
-                "remote-viewer",
-                "--full-screen",
-                "/run/relayinner-display/console/spice-current.vv",
+                "moonlight",
+                "stream",
+                "192.168.50.20",
+                "Desktop",
+                "--display-mode",
+                "fullscreen",
             ],
         }
         decoded = decode_message(encode_message(payload))
@@ -61,6 +65,25 @@ class IPCTests(unittest.TestCase):
                     "backend": "spice",
                     "launcher": "remote-viewer",
                     "argv": ["", "--full-screen"],
+                }
+            )
+
+    def test_relative_cwd_is_rejected(self) -> None:
+        with self.assertRaises(IPCError):
+            validate_daemon_message(
+                {
+                    "type": "connect_console",
+                    "backend": "moonlight",
+                    "launcher": "moonlight",
+                    "cwd": "moonlight",
+                    "argv": [
+                        "moonlight",
+                        "stream",
+                        "192.168.50.20",
+                        "Desktop",
+                        "--display-mode",
+                        "fullscreen",
+                    ],
                 }
             )
 

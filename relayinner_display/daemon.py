@@ -3,6 +3,7 @@ from __future__ import annotations
 from argparse import ArgumentParser
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+import re
 from shutil import which
 from typing import Any, Callable
 import grp
@@ -11,6 +12,7 @@ import os
 import pwd
 import socket
 import stat
+import subprocess
 import time
 
 from .config import AppConfig, ConfigError, build_fallback_config, load_config
@@ -38,13 +40,19 @@ CONSOLE_LAUNCHERS = {
     "spice": "remote-viewer",
     "vnc": "remote-viewer",
     "looking-glass": "looking-glass-client",
+    "moonlight": "moonlight",
 }
-IMPLEMENTED_CONSOLE_BACKENDS = {"spice", "vnc", "looking-glass"}
+IMPLEMENTED_CONSOLE_BACKENDS = {"spice", "vnc", "looking-glass", "moonlight"}
 REQUIRED_DAEMON_BINARIES: tuple[str, ...] = ()
+MIN_MOONLIGHT_VERSION = (6, 0, 0)
+VERSION_RE = re.compile(r"(\d+)\.(\d+)\.(\d+)")
 
 
 class RuntimeValidationError(RuntimeError):
     """Raised when runtime prerequisites are missing or inaccessible."""
+
+
+CommandRunner = Callable[..., subprocess.CompletedProcess[str]]
 
 
 def utcnow() -> datetime:
@@ -159,6 +167,7 @@ class DisplayDaemon:
         power_button_source: Any | None = None,
         host_policy_checker: Any | None = None,
         dependency_finder: Callable[[str], str | None] | None = None,
+        command_runner: CommandRunner = subprocess.run,
         startup_error: str | None = None,
     ) -> None:
         self.config = config
@@ -192,6 +201,7 @@ class DisplayDaemon:
         self.power_button_source = power_button_source
         self.host_policy_checker = host_policy_checker
         self.dependency_finder = dependency_finder or which
+        self.command_runner = command_runner
         self.validate_runtime_dependencies = dependency_finder is not None or isinstance(
             proxmox,
             ProxmoxClient,
@@ -208,6 +218,7 @@ class DisplayDaemon:
         self.config.console.artifact_dir.mkdir(parents=True, exist_ok=True)
         os.chmod(self.config.console.artifact_dir, 0o750)
         chown_if_present(self.config.console.artifact_dir, SESSION_USER, SESSION_GROUP, self.logger)
+        self._prepare_moonlight_workspace()
 
         for path in (self.config.runtime.control_socket, *self._configured_console_artifact_paths()):
             if path.exists():
@@ -679,6 +690,19 @@ class DisplayDaemon:
             return (self._spice_vv_path(),)
         return ()
 
+    def _prepare_moonlight_workspace(self) -> None:
+        moonlight = self.config.console.moonlight
+        if moonlight is None:
+            return
+
+        moonlight.state_dir.mkdir(parents=True, exist_ok=True)
+        os.chmod(moonlight.state_dir, 0o700)
+        chown_if_present(moonlight.state_dir, SESSION_USER, SESSION_GROUP, self.logger)
+
+        moonlight.portable_marker_path.touch(exist_ok=True)
+        os.chmod(moonlight.portable_marker_path, 0o600)
+        chown_if_present(moonlight.portable_marker_path, SESSION_USER, SESSION_GROUP, self.logger)
+
     def _spice_vv_path(self) -> Path:
         if self.config.console.spice is not None:
             return self.config.console.spice.vv_path
@@ -756,6 +780,25 @@ class DisplayDaemon:
                 "argv": looking_glass.argv,
             }
 
+        if backend == "moonlight":
+            moonlight = self.config.console.moonlight
+            if moonlight is None:
+                raise AssertionError("Moonlight backend selected without console.moonlight config")
+
+            self.console_logger.info(
+                "Prepared Moonlight launch for VM %s at %s from workspace=%s",
+                self.state.vmid,
+                moonlight.host_authority,
+                moonlight.state_dir,
+            )
+            return {
+                "type": "connect_console",
+                "backend": backend,
+                "launcher": moonlight.binary,
+                "cwd": str(moonlight.state_dir),
+                "argv": moonlight.argv,
+            }
+
         raise AssertionError(f"Unhandled console backend: {backend}")
 
     def _validate_runtime_dependencies(self) -> None:
@@ -771,20 +814,38 @@ class DisplayDaemon:
             self._ensure_binary_available(binary)
 
     def _validate_console_startup_prerequisites(self) -> None:
-        if self.config.target.console_backend != "looking-glass":
+        backend = self.config.target.console_backend
+        if backend == "looking-glass":
+            self._validate_looking_glass_preflight(
+                check_binary=self.validate_runtime_dependencies,
+                check_session_access=self.validate_runtime_dependencies,
+            )
+            looking_glass = self.config.console.looking_glass
+            if looking_glass is None:
+                raise AssertionError(
+                    "Looking Glass backend selected without console.looking_glass config"
+                )
+            self.console_logger.info(
+                "Looking Glass startup preflight satisfied: shm_file=%s renderer=%s",
+                looking_glass.shm_file,
+                looking_glass.renderer,
+            )
             return
 
-        self._validate_looking_glass_preflight(
+        if backend != "moonlight":
+            return
+
+        self._validate_moonlight_startup_prerequisites(
             check_binary=self.validate_runtime_dependencies,
-            check_session_access=self.validate_runtime_dependencies,
         )
-        looking_glass = self.config.console.looking_glass
-        if looking_glass is None:
-            raise AssertionError("Looking Glass backend selected without console.looking_glass config")
+        moonlight = self.config.console.moonlight
+        if moonlight is None:
+            raise AssertionError("Moonlight backend selected without console.moonlight config")
         self.console_logger.info(
-            "Looking Glass startup preflight satisfied: shm_file=%s renderer=%s",
-            looking_glass.shm_file,
-            looking_glass.renderer,
+            "Moonlight startup contract satisfied: host=%s workspace=%s binary=%s",
+            moonlight.host_authority,
+            moonlight.state_dir,
+            moonlight.binary,
         )
 
     def _configured_console_launcher(self) -> str:
@@ -796,6 +857,11 @@ class DisplayDaemon:
                     "Looking Glass backend selected without console.looking_glass config"
                 )
             return looking_glass.binary
+        if backend == "moonlight":
+            moonlight = self.config.console.moonlight
+            if moonlight is None:
+                raise AssertionError("Moonlight backend selected without console.moonlight config")
+            return moonlight.binary
         return CONSOLE_LAUNCHERS[backend]
 
     def _ensure_binary_available(self, binary: str) -> None:
@@ -850,6 +916,67 @@ class DisplayDaemon:
                 f"Looking Glass shared memory path could not be opened: {shm_file}: {exc}"
             ) from exc
         os.close(descriptor)
+
+    def _validate_moonlight_startup_prerequisites(
+        self,
+        *,
+        check_binary: bool,
+    ) -> None:
+        moonlight = self.config.console.moonlight
+        if moonlight is None:
+            raise AssertionError("Moonlight backend selected without console.moonlight config")
+
+        if check_binary:
+            self._ensure_binary_available(moonlight.binary)
+            version = self._moonlight_version(moonlight.binary)
+            if version < MIN_MOONLIGHT_VERSION:
+                actual = ".".join(str(part) for part in version)
+                minimum = ".".join(str(part) for part in MIN_MOONLIGHT_VERSION)
+                raise RuntimeValidationError(
+                    f"Moonlight version must be >= {minimum}, found {actual}"
+                )
+
+        if not moonlight.state_dir.is_dir():
+            raise RuntimeValidationError(
+                f"Moonlight state_dir is not a directory: {moonlight.state_dir}"
+            )
+        if not moonlight.portable_marker_path.exists():
+            raise RuntimeValidationError(
+                f"Moonlight portable marker is missing: {moonlight.portable_marker_path}"
+            )
+
+    def _moonlight_version(self, binary: str) -> tuple[int, int, int]:
+        command = [self._resolved_binary(binary), "--version"]
+        try:
+            completed = self.command_runner(
+                command,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+        except OSError as exc:
+            raise RuntimeValidationError(
+                f"Failed to read Moonlight version from {binary}: {exc}"
+            ) from exc
+
+        output = "\n".join(
+            part for part in ((completed.stdout or "").strip(), (completed.stderr or "").strip()) if part
+        )
+        match = VERSION_RE.search(output)
+        if completed.returncode != 0 or match is None:
+            detail = output or f"exit status {completed.returncode}"
+            raise RuntimeValidationError(
+                f"Unable to determine Moonlight version from {binary}: {detail}"
+            )
+
+        return tuple(int(match.group(index)) for index in range(1, 4))
+
+    def _resolved_binary(self, binary: str) -> str:
+        binary_path = Path(binary)
+        if binary_path.is_absolute():
+            return str(binary_path)
+        resolved = self.dependency_finder(binary)
+        return resolved or binary
 
     def _session_user_can_read_path(self, path: Path) -> bool:
         try:

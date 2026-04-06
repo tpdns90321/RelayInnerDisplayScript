@@ -229,6 +229,18 @@ def render_sample_config() -> str:
         # disable_host_screensaver = true
         # spice_enabled = true
 
+        # To use the Moonlight backend instead, set console_backend = "moonlight",
+        # install Linux moonlight-qt 6.0.0 or newer yourself, and point host at a
+        # Sunshine guest that you prepared outside this installer.
+        #
+        # [console.moonlight]
+        # binary = "moonlight"
+        # host = "192.168.50.20"
+        # base_port = 47989
+        # app = "Desktop"
+        # state_dir = "/var/lib/relayinner-display/moonlight"
+        # quit_app_after_session = false
+
         [policy]
         poll_interval_ms = 2000
         reconnect_initial_ms = 1000
