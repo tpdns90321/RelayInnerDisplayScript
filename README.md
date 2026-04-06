@@ -17,7 +17,8 @@ This repository now includes Specs 10 through 17 of the current MVP plan plus Sp
 - Spec 15 now hardens the appliance integration layer with the final MVP state-file contract, runtime dependency validation, repeated Proxmox-failure degradation, subsystem-scoped journald logging, and systemd restart-loop thresholds.
 - Spec 16 now turns the root README into the first-run install entrypoint and persists `/var/lib/relayinner-display/install-state.json` so later uninstall or upgrade work can see what the installer changed.
 - Spec 17 now adds a root-owned `uninstall.sh`, install-state-aware host restoration, default config preservation, and an explicit purge path for full relay cleanup.
-- Specs 20 through 22 now define the post-MVP console-backend expansion so operators can later choose SPICE, VNC, or Looking Glass from config; the current implementation remains SPICE-only.
+- Spec 20 now generalizes the shared config, runtime artifact layout, IPC, session launch path, and runtime state around a backend-neutral console contract while keeping SPICE as the only implemented console-preparation path for now.
+- Specs 21 and 22 still define the pending VNC and Looking Glass backend implementations that will plug into the Spec 20 contract later.
 - The current design still assumes direct installation on a Proxmox host, not an LXC container.
 
 ## Quickstart
@@ -58,7 +59,7 @@ If the kiosk journal or a direct `runuser -u relayinner-display -- /usr/local/li
 
 If display sleep or wake fails and the kiosk journal shows `Wayland server does not support wlr-output-power-management-v1`, the host is still using an older `power_helper = "wlopm"` setting. Cage reliably supports output changes through `wlr-randr`, not the `wlopm` protocol on all versions, so refresh the install with `sudo ./install.sh` and keep the default `power_helper = "wlr-randr"` unless you have verified compositor-side `wlopm` support.
 
-If `remote-viewer` starts and then exits with a generic dialog such as `Unable to connect graphic server /run/relayinner-display/current.vv`, verify the generated `.vv` file keeps certificate and other multiline values on one escaped line. Proxmox returns the SPICE `ca` field with embedded `\n` escapes; writing that back as literal newlines corrupts the INI-style `.vv` file and can make `remote-viewer` fail immediately even though `pvesh ... spiceproxy` succeeded.
+If `remote-viewer` starts and then exits with a generic dialog such as `Unable to connect graphic server /run/relayinner-display/console/spice-current.vv`, verify the generated `.vv` file keeps certificate and other multiline values on one escaped line. Proxmox returns the SPICE `ca` field with embedded `\n` escapes; writing that back as literal newlines corrupts the INI-style `.vv` file and can make `remote-viewer` fail immediately even though `pvesh ... spiceproxy` succeeded.
 
 ## Uninstall
 
@@ -108,14 +109,14 @@ The current MVP design assumes:
 
 Current implementation coverage:
 
-- `relayinner_display.config` validates the shared TOML config model from Specs 10, 12, and 13.
+- `relayinner_display.config` now validates the shared TOML config model from Specs 10, 12, 13, and 20, including the backend-neutral `[console]` namespace plus legacy SPICE path compatibility.
 - `relayinner_display.proxmox` wraps local `qm` and `pvesh` calls, writes `remote-viewer` `.vv` files, and submits guest start/shutdown requests.
-- `relayinner_display.daemon` now owns the end-to-end appliance state machine, validates required runtime binaries, degrades after repeated local Proxmox failures, captures host power-button intent, and writes the Spec 15 runtime state contract to disk.
+- `relayinner_display.daemon` now owns the end-to-end appliance state machine, validates required runtime binaries, emits backend-neutral `connect_console` IPC, degrades after repeated local Proxmox failures, captures host power-button intent, and writes the expanded runtime state contract to disk; actual console preparation remains SPICE-only until Specs 21 and 22 land.
 - `relayinner_display.input` validates host `logind` power-key policy and captures `KEY_POWER` presses from one evdev node.
-- `relayinner_display.session` supervises `remote-viewer`, tracks waiting/degraded/display-sleeping session state, applies Wayland display-power actions through `wlr-randr` by default while preserving custom helper support, and emits subsystem-scoped session, console, and display logs.
+- `relayinner_display.session` now validates backend/launcher allowlists for generic console launches, keeps legacy `connect_spice` compatibility during the transition window, tracks waiting/degraded/display-sleeping session state, applies Wayland display-power actions through `wlr-randr` by default while preserving custom helper support, and emits subsystem-scoped session, console, and display logs.
 - `relayinner_display.kiosk` provides the Cage session entrypoint and the canonical `cage -- ...` command shape against the managed `relayinner-display-seatd.service`.
 - `relayinner_display.bootstrap` renders the sample config, systemd units, logind override, host-detected DRM supplementary groups for the kiosk unit, the Spec 15 `StartLimitIntervalSec=120` / `StartLimitBurst=5` restart-loop policy, the Spec 16 install-state record under `/var/lib/relayinner-display/install-state.json`, and the Spec 17 uninstall flow that restores `tty1` plus optional display-manager state conservatively.
-- `tests/` now cover config parsing, IPC validation, Proxmox command handling, reconnect logic, daemon DPMS debounce behavior, Spec 15 state persistence, runtime dependency degradation, restart-threshold rendering, install-state persistence, uninstall fallback and purge behavior, session supervision, logind policy parsing, power-button handling, display-power handling, and kiosk entrypoint wiring.
+- `tests/` now cover config parsing, backend-neutral IPC validation, Proxmox command handling, reconnect logic, daemon DPMS debounce behavior, Spec 15 state persistence, Spec 20 runtime-state/backend handling, runtime dependency degradation, restart-threshold rendering, install-state persistence, uninstall fallback and purge behavior, session supervision, logind policy parsing, power-button handling, display-power handling, and kiosk entrypoint wiring.
 
 Operationally, the appliance is expected to move through a small state machine:
 
@@ -199,8 +200,8 @@ The current implementation now manages:
 └── tasks/
 ```
 
-- `relayinner_display/` holds the current Python runtime for Specs 10 through 16.
-- `config.example.toml` is the host bootstrap sample config installed by Specs 14 and 16.
+- `relayinner_display/` holds the current Python runtime for Specs 10 through 17 plus the shared Spec 20 console contract layer.
+- `config.example.toml` is the host bootstrap sample config installed by Specs 14, 16, and 20.
 - `docs/` holds operator-facing setup documentation for the host-direct install path.
 - `install.sh` is the idempotent host bootstrap entrypoint from Specs 14 and 16.
 - `uninstall.sh` is the safe removal entrypoint from Spec 17.

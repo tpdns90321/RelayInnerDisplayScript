@@ -201,8 +201,13 @@ def render_sample_config() -> str:
         [runtime]
         run_dir = "/run/relayinner-display"
         control_socket = "/run/relayinner-display/session.sock"
-        spice_vv_path = "/run/relayinner-display/current.vv"
         log_namespace = "relayinner-display"
+
+        [console]
+        artifact_dir = "/run/relayinner-display/console"
+
+        [console.spice]
+        vv_path = "/run/relayinner-display/console/spice-current.vv"
 
         [policy]
         poll_interval_ms = 2000

@@ -152,6 +152,11 @@ class BootstrapTests(unittest.TestCase):
             config = load_config(config_path)
 
         self.assertTrue(config.input.forward_power_button)
+        self.assertEqual(config.console.artifact_dir, Path("/run/relayinner-display/console"))
+        self.assertEqual(
+            config.console.spice.vv_path,
+            Path("/run/relayinner-display/console/spice-current.vv"),
+        )
         self.assertEqual(config.runtime.run_dir, Path("/run/relayinner-display"))
 
     def test_render_logind_override_matches_parser_expectation(self) -> None:

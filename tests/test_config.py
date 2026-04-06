@@ -19,8 +19,14 @@ VALID_CONFIG = textwrap.dedent(
     [runtime]
     run_dir = "/run/relayinner-display"
     control_socket = "/run/relayinner-display/session.sock"
-    spice_vv_path = "/run/relayinner-display/current.vv"
     log_namespace = "relayinner-display"
+
+    [console]
+    artifact_dir = "/run/relayinner-display/console"
+
+    [console.spice]
+    vv_path = "/run/relayinner-display/console/spice-current.vv"
+
 
     [policy]
     poll_interval_ms = 2000
@@ -52,6 +58,11 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.input.debounce_ms, 2000)
         self.assertEqual(config.policy.power_button_action_when_running, "shutdown")
         self.assertEqual(config.policy.shutdown_timeout_s, 90)
+        self.assertEqual(config.console.artifact_dir, Path("/run/relayinner-display/console"))
+        self.assertEqual(
+            config.console.spice.vv_path,
+            Path("/run/relayinner-display/console/spice-current.vv"),
+        )
 
     def test_load_config_accepts_display_overrides(self) -> None:
         content = VALID_CONFIG.replace(
@@ -126,7 +137,111 @@ class ConfigTests(unittest.TestCase):
                 load_config(config_path)
 
     def test_unsupported_console_backend_raises(self) -> None:
+        content = VALID_CONFIG.replace('console_backend = "spice"', 'console_backend = "rdp"')
+        with TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "config.toml"
+            config_path.write_text(content, encoding="utf-8")
+
+            with self.assertRaises(ConfigError):
+                load_config(config_path)
+
+    def test_accepts_vnc_and_looking_glass_backends(self) -> None:
         content = VALID_CONFIG.replace('console_backend = "spice"', 'console_backend = "vnc"')
+        content = content.replace(
+            "[console.spice]\nvv_path = \"/run/relayinner-display/console/spice-current.vv\"\n",
+            "[console.vnc]\n",
+        )
+
+        with TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "config.toml"
+            config_path.write_text(content, encoding="utf-8")
+            config = load_config(config_path)
+
+        self.assertEqual(config.target.console_backend, "vnc")
+        self.assertIsNotNone(config.console.vnc)
+        self.assertIsNone(config.console.spice)
+
+        content = VALID_CONFIG.replace('console_backend = "spice"', 'console_backend = "looking-glass"')
+        content = content.replace(
+            "[console.spice]\nvv_path = \"/run/relayinner-display/console/spice-current.vv\"\n",
+            "[console.looking_glass]\n",
+        )
+        with TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "config.toml"
+            config_path.write_text(content, encoding="utf-8")
+            config = load_config(config_path)
+
+        self.assertEqual(config.target.console_backend, "looking-glass")
+        self.assertIsNotNone(config.console.looking_glass)
+        self.assertIsNone(config.console.spice)
+
+    def test_legacy_runtime_spice_vv_path_is_accepted_for_spice_only(self) -> None:
+        content = """
+            [target]
+            vmid = 101
+            node_name = "auto"
+            guest_os = "windows"
+            console_backend = "spice"
+
+            [runtime]
+            run_dir = "/run/relayinner-display"
+            control_socket = "/run/relayinner-display/session.sock"
+            spice_vv_path = "/run/relayinner-display/legacy/current.vv"
+            log_namespace = "relayinner-display"
+
+            [policy]
+            poll_interval_ms = 2000
+            reconnect_initial_ms = 1000
+            reconnect_max_ms = 15000
+            command_timeout_s = 10
+            """
+        with TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "config.toml"
+            config_path.write_text(content.strip(), encoding="utf-8")
+            config = load_config(config_path)
+
+        self.assertEqual(
+            config.runtime.spice_vv_path,
+            Path("/run/relayinner-display/legacy/current.vv"),
+        )
+        self.assertEqual(config.console.spice.vv_path, Path("/run/relayinner-display/legacy/current.vv"))
+
+    def test_runtime_spice_vv_path_rejected_for_non_spice_backends(self) -> None:
+        content = textwrap.dedent(
+            """
+            [target]
+            vmid = 101
+            node_name = "auto"
+            guest_os = "windows"
+            console_backend = "vnc"
+
+            [runtime]
+            run_dir = "/run/relayinner-display"
+            control_socket = "/run/relayinner-display/session.sock"
+            spice_vv_path = "/run/relayinner-display/legacy/current.vv"
+            log_namespace = "relayinner-display"
+
+            [console]
+            artifact_dir = "/run/relayinner-display/console"
+
+            [console.vnc]
+            """
+        )
+        with TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "config.toml"
+            config_path.write_text(content, encoding="utf-8")
+
+            with self.assertRaises(ConfigError):
+                load_config(config_path)
+
+    def test_backend_specific_mismatch_rejected(self) -> None:
+        content = VALID_CONFIG.replace(
+            'console_backend = "spice"',
+            'console_backend = "spice"',
+        ).replace(
+            "[console.spice]\nvv_path = \"/run/relayinner-display/console/spice-current.vv\"\n",
+            "[console.vnc]\nfoo = 1\n",
+        )
         with TemporaryDirectory() as temp_dir:
             config_path = Path(temp_dir) / "config.toml"
             config_path.write_text(content, encoding="utf-8")

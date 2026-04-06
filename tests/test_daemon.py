@@ -8,6 +8,10 @@ import unittest
 
 from relayinner_display.config import (
     AppConfig,
+    ConsoleConfig,
+    ConsoleLookingGlassConfig,
+    ConsoleSpiceConfig,
+    ConsoleVncConfig,
     DisplayConfig,
     InputConfig,
     PolicyConfig,
@@ -135,16 +139,30 @@ class DisplayDaemonTests(unittest.TestCase):
             tick_actions = daemon.tick(now=start_time)
             self.assertEqual(
                 tick_actions,
-                [{"type": "connect_spice", "vv_path": str(config.runtime.spice_vv_path)}],
+                [
+                    {
+                        "type": "connect_console",
+                        "backend": "spice",
+                        "launcher": "remote-viewer",
+                        "argv": [
+                            "remote-viewer",
+                            "--full-screen",
+                            str(config.console.spice.vv_path),
+                        ],
+                    }
+                ],
             )
             self.assertEqual(daemon.state.session_state, SessionState.REQUESTING_CONSOLE)
-            self.assertTrue(config.runtime.spice_vv_path.exists())
+            self.assertTrue(config.console.spice.vv_path.exists())
 
-            daemon.handle_session_message({"type": "console_started", "pid": 4321}, now=start_time)
+            daemon.handle_session_message(
+                {"type": "console_started", "backend": "spice", "pid": 4321},
+                now=start_time,
+            )
             self.assertEqual(daemon.state.session_state, SessionState.SHOWING_CONSOLE)
 
             exit_actions = daemon.handle_session_message(
-                {"type": "console_exited", "code": 1, "signal": 0},
+                {"type": "console_exited", "backend": "spice", "code": 1, "signal": 0},
                 now=start_time,
             )
             self.assertEqual(exit_actions, [{"type": "show_waiting", "reason": "reconnecting"}])
@@ -156,7 +174,18 @@ class DisplayDaemonTests(unittest.TestCase):
             reconnect_tick = daemon.tick(now=start_time + timedelta(milliseconds=1000))
             self.assertEqual(
                 reconnect_tick,
-                [{"type": "connect_spice", "vv_path": str(config.runtime.spice_vv_path)}],
+                [
+                    {
+                        "type": "connect_console",
+                        "backend": "spice",
+                        "launcher": "remote-viewer",
+                        "argv": [
+                            "remote-viewer",
+                            "--full-screen",
+                            str(config.console.spice.vv_path),
+                        ],
+                    }
+                ],
             )
             self.assertEqual(len(proxmox.request_spice_calls), 2)
 
@@ -171,7 +200,10 @@ class DisplayDaemonTests(unittest.TestCase):
             daemon.start(now=start_time)
             daemon.handle_session_message({"type": "session_ready"}, now=start_time)
             daemon.tick(now=start_time)
-            daemon.handle_session_message({"type": "console_started", "pid": 4321}, now=start_time)
+            daemon.handle_session_message(
+                {"type": "console_started", "backend": "spice", "pid": 4321},
+                now=start_time,
+            )
 
             actions = daemon.tick(now=start_time + timedelta(milliseconds=100))
 
@@ -236,7 +268,16 @@ class DisplayDaemonTests(unittest.TestCase):
             actions,
             [
                 {"type": "display_power", "state": "on", "output": ""},
-                {"type": "connect_spice", "vv_path": str(config.runtime.spice_vv_path)},
+                {
+                    "type": "connect_console",
+                    "backend": "spice",
+                    "launcher": "remote-viewer",
+                    "argv": [
+                        "remote-viewer",
+                        "--full-screen",
+                        str(config.console.spice.vv_path),
+                    ],
+                },
             ],
         )
         self.assertEqual(daemon.state.display_power_intent, "on")
@@ -541,6 +582,24 @@ class DisplayDaemonTests(unittest.TestCase):
         self.assertEqual(daemon.state.session_state, SessionState.DEGRADED)
         self.assertEqual(daemon.state.degraded_reason, "Missing required binary: remote-viewer")
 
+    def test_unimplemented_console_backend_enters_degraded_with_backend_name(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            config = build_config(Path(temp_dir), backend="vnc")
+            daemon = DisplayDaemon(config=config, proxmox=FakeProxmoxClient(["running"]))
+            start_time = datetime(2026, 4, 4, 0, 0, tzinfo=timezone.utc)
+
+            daemon.prepare_runtime()
+            daemon.start(now=start_time)
+            daemon.handle_session_message({"type": "session_ready"}, now=start_time)
+            actions = daemon.tick(now=start_time)
+
+        self.assertEqual(actions, [{"type": "show_waiting", "reason": "degraded"}])
+        self.assertEqual(daemon.state.session_state, SessionState.DEGRADED)
+        self.assertEqual(
+            daemon.state.degraded_reason,
+            "Console preparation failed for backend=vnc: not implemented",
+        )
+
     def test_repeated_proxmox_failures_enter_degraded_after_retry_budget(self) -> None:
         with TemporaryDirectory() as temp_dir:
             config = build_config(Path(temp_dir))
@@ -570,19 +629,25 @@ class DisplayDaemonTests(unittest.TestCase):
             daemon.start(now=start_time)
             daemon.handle_session_message({"type": "session_ready"}, now=start_time)
             daemon.tick(now=start_time)
-            daemon.handle_session_message({"type": "console_started", "pid": 4321}, now=start_time)
             daemon.handle_session_message(
-                {"type": "console_exited", "code": 1, "signal": 0},
+                {"type": "console_started", "backend": "spice", "pid": 4321},
+                now=start_time,
+            )
+            daemon.handle_session_message(
+                {"type": "console_exited", "backend": "spice", "code": 1, "signal": 0},
                 now=start_time + timedelta(seconds=1),
             )
 
             payload = json.loads(config.runtime.daemon_state_path.read_text(encoding="utf-8"))
 
         self.assertEqual(payload["appliance_state"], "reconnecting_console")
+        self.assertEqual(payload["console_backend"], "spice")
+        self.assertIsNone(payload["active_console_backend"])
         self.assertTrue(payload["session_ready"])
         self.assertEqual(payload["vm_power_state"], "running")
         self.assertEqual(payload["display_power_applied"], "on")
         self.assertIsNone(payload["degraded_reason"])
+        self.assertEqual(payload["last_console_exit"]["backend"], "spice")
         self.assertEqual(payload["last_console_exit"]["code"], 1)
         self.assertEqual(payload["last_console_exit"]["signal"], 0)
 
@@ -590,6 +655,7 @@ class DisplayDaemonTests(unittest.TestCase):
 def build_config(
     root: Path,
     *,
+    backend: str = "spice",
     output_name: str = "",
     power_helper: str = "wlr-randr",
     dpms_off_delay_ms: int = 5000,
@@ -598,19 +664,28 @@ def build_config(
     debounce_ms: int = 2000,
 ) -> AppConfig:
     run_dir = root / "run"
+    console = ConsoleConfig(
+        artifact_dir=run_dir / "console",
+        spice=ConsoleSpiceConfig(vv_path=run_dir / "console" / "spice-current.vv")
+        if backend == "spice"
+        else None,
+        vnc=ConsoleVncConfig() if backend == "vnc" else None,
+        looking_glass=ConsoleLookingGlassConfig() if backend == "looking-glass" else None,
+    )
     return AppConfig(
         target=TargetConfig(
             vmid=101,
             node_name="auto",
             guest_os="windows",
-            console_backend="spice",
+            console_backend=backend,
         ),
         runtime=RuntimeConfig(
             run_dir=run_dir,
             control_socket=run_dir / "session.sock",
-            spice_vv_path=run_dir / "current.vv",
+            spice_vv_path=run_dir / "console" / "spice-current.vv",
             log_namespace="relayinner-display",
         ),
+        console=console,
         display=DisplayConfig(
             output_name=output_name,
             power_helper=power_helper,

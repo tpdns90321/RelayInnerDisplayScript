@@ -28,6 +28,8 @@ class SessionState(str, Enum):
 class RuntimeState:
     vmid: int
     node_name: str
+    console_backend: str = "spice"
+    active_console_backend: str | None = None
     vm_power_state: str = "unknown"
     session_ready: bool = False
     display_power_intent: str = "on"
@@ -55,17 +57,28 @@ class RuntimeState:
         self.last_power_button_result = result
         self.power_button_action_in_flight = result == "submitted"
 
-    def mark_console_exit(self, when: datetime, code: int, signal: int) -> None:
-        self.last_console_exit = {
+    def mark_console_exit(
+        self,
+        when: datetime,
+        code: int,
+        signal: int,
+        backend: str | None = None,
+    ) -> None:
+        payload: dict[str, str | int] = {
             "at": when.isoformat().replace("+00:00", "Z"),
             "code": code,
             "signal": signal,
         }
+        if backend is not None:
+            payload["backend"] = backend
+        self.last_console_exit = payload
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "vmid": self.vmid,
             "node_name": self.node_name,
+            "console_backend": self.console_backend,
+            "active_console_backend": self.active_console_backend,
             "appliance_state": self.session_state.public_value(),
             "session_state": self.session_state.value,
             "vm_power_state": self.vm_power_state,

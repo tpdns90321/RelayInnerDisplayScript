@@ -6,14 +6,15 @@ from typing import Any
 import tomllib
 
 
-SUPPORTED_CONSOLE_BACKENDS = {"spice"}
+SUPPORTED_CONSOLE_BACKENDS = {"spice", "vnc", "looking-glass"}
 SUPPORTED_DPMS_POLICIES = {"vm-power"}
 SUPPORTED_POWER_BUTTON_ACTIONS_WHEN_RUNNING = {"shutdown"}
 SUPPORTED_POWER_BUTTON_ACTIONS_WHEN_STOPPED = {"start"}
 DEFAULT_POWER_BUTTON_EVENT = Path("/dev/input/by-path/platform-i8042-serio-0-event-power")
 DEFAULT_RUNTIME_RUN_DIR = Path("/run/relayinner-display")
 DEFAULT_CONTROL_SOCKET = DEFAULT_RUNTIME_RUN_DIR / "session.sock"
-DEFAULT_SPICE_VV_PATH = DEFAULT_RUNTIME_RUN_DIR / "current.vv"
+DEFAULT_CONSOLE_ARTIFACT_DIR = DEFAULT_RUNTIME_RUN_DIR / "console"
+DEFAULT_SPICE_VV_PATH = DEFAULT_CONSOLE_ARTIFACT_DIR / "spice-current.vv"
 DEFAULT_LOG_NAMESPACE = "relayinner-display"
 
 
@@ -69,12 +70,38 @@ class PolicyConfig:
 
 
 @dataclass(frozen=True)
+class ConsoleSpiceConfig:
+    vv_path: Path
+
+
+@dataclass(frozen=True)
+class ConsoleVncConfig:
+    pass
+
+
+@dataclass(frozen=True)
+class ConsoleLookingGlassConfig:
+    pass
+
+
+@dataclass(frozen=True)
+class ConsoleConfig:
+    artifact_dir: Path
+    spice: ConsoleSpiceConfig | None = None
+    vnc: ConsoleVncConfig | None = None
+    looking_glass: ConsoleLookingGlassConfig | None = None
+
+
+@dataclass(frozen=True)
 class AppConfig:
     target: TargetConfig
     runtime: RuntimeConfig
     policy: PolicyConfig
     display: DisplayConfig = field(default_factory=DisplayConfig)
     input: InputConfig = field(default_factory=InputConfig)
+    console: ConsoleConfig = field(
+        default_factory=lambda: ConsoleConfig(artifact_dir=DEFAULT_CONSOLE_ARTIFACT_DIR),
+    )
 
 
 def build_fallback_config() -> AppConfig:
@@ -90,6 +117,10 @@ def build_fallback_config() -> AppConfig:
             control_socket=DEFAULT_CONTROL_SOCKET,
             spice_vv_path=DEFAULT_SPICE_VV_PATH,
             log_namespace=DEFAULT_LOG_NAMESPACE,
+        ),
+        console=ConsoleConfig(
+            artifact_dir=DEFAULT_CONSOLE_ARTIFACT_DIR,
+            spice=ConsoleSpiceConfig(vv_path=DEFAULT_SPICE_VV_PATH),
         ),
         policy=PolicyConfig(
             poll_interval_ms=2000,
@@ -126,6 +157,7 @@ def parse_config(raw: dict[str, Any]) -> AppConfig:
     policy_table = _require_table(raw, "policy")
     display_table = _optional_table(raw, "display")
     input_table = _optional_table(raw, "input")
+    console_table = _optional_table(raw, "console")
 
     target = TargetConfig(
         vmid=_require_positive_int(target_table, "vmid"),
@@ -139,13 +171,31 @@ def parse_config(raw: dict[str, Any]) -> AppConfig:
             f"Unsupported console_backend={target.console_backend!r}; supported values: {supported}"
         )
 
+    legacy_spice_vv_path = _optional_absolute_path_or_none(runtime_table, "spice_vv_path")
+    if target.console_backend != "spice" and legacy_spice_vv_path is not None:
+        raise ConfigError(
+            "runtime.spice_vv_path is only supported for console_backend='spice'"
+        )
+
+    console = _parse_console_config(
+        backend=target.console_backend,
+        table=console_table,
+        legacy_spice_vv_path=legacy_spice_vv_path,
+    )
+    runtime_spice_vv_path = (
+        legacy_spice_vv_path
+        if legacy_spice_vv_path is not None
+        else (console.spice.vv_path if console.spice is not None else console.artifact_dir / "spice-current.vv")
+    )
+
     runtime = RuntimeConfig(
         run_dir=_require_absolute_path(runtime_table, "run_dir"),
         control_socket=_require_absolute_path(runtime_table, "control_socket"),
-        spice_vv_path=_require_absolute_path(runtime_table, "spice_vv_path"),
+        spice_vv_path=runtime_spice_vv_path,
         log_namespace=_require_non_empty_string(runtime_table, "log_namespace"),
     )
     _require_child_path(runtime.run_dir, runtime.control_socket, "runtime.control_socket")
+    _require_child_path(runtime.run_dir, console.artifact_dir, "console.artifact_dir")
     _require_child_path(runtime.run_dir, runtime.spice_vv_path, "runtime.spice_vv_path")
 
     display = DisplayConfig(
@@ -221,6 +271,7 @@ def parse_config(raw: dict[str, Any]) -> AppConfig:
         policy=policy,
         display=display,
         input=input_config,
+        console=console,
     )
 
 
@@ -298,6 +349,68 @@ def _optional_absolute_path(table: dict[str, Any], key: str, default: Path) -> P
     if not path.is_absolute():
         raise ConfigError(f"{key!r} must be an absolute path")
     return path
+
+
+def _parse_console_config(
+    backend: str,
+    table: dict[str, Any],
+    legacy_spice_vv_path: Path | None = None,
+) -> ConsoleConfig:
+    artifact_dir = _optional_absolute_path(table, "artifact_dir", default=DEFAULT_CONSOLE_ARTIFACT_DIR)
+    allowed_console_keys = {"artifact_dir", "spice", "vnc", "looking_glass"}
+    _require_subset_keys(table, "console", allowed_console_keys)
+
+    spice_block = _optional_table(table, "spice")
+    vnc_block = _optional_table(table, "vnc")
+    looking_glass_block = _optional_table(table, "looking_glass")
+
+    if backend == "spice":
+        _require_empty_table(looking_glass_block, backend, "console.looking_glass")
+        _require_empty_table(vnc_block, backend, "console.vnc")
+        _require_only_keys(spice_block, {"vv_path"}, "console.spice")
+
+        if spice_block:
+            vv_path = _require_absolute_path(spice_block, "vv_path")
+        elif legacy_spice_vv_path is not None:
+            vv_path = legacy_spice_vv_path
+        else:
+            vv_path = artifact_dir / "spice-current.vv"
+        spice = ConsoleSpiceConfig(vv_path=vv_path)
+        return ConsoleConfig(artifact_dir=artifact_dir, spice=spice)
+
+    if backend == "vnc":
+        _require_empty_table(spice_block, backend, "console.spice")
+        _require_empty_table(looking_glass_block, backend, "console.looking_glass")
+        return ConsoleConfig(artifact_dir=artifact_dir, vnc=ConsoleVncConfig())
+
+    _require_empty_table(spice_block, backend, "console.spice")
+    _require_empty_table(vnc_block, backend, "console.vnc")
+    return ConsoleConfig(artifact_dir=artifact_dir, looking_glass=ConsoleLookingGlassConfig())
+
+
+def _require_empty_table(block: dict[str, Any], backend: str, label: str) -> None:
+    if block:
+        raise ConfigError(f"{label} is not valid for console_backend={backend!r}")
+
+
+def _require_only_keys(table: dict[str, Any], allowed_keys: set[str], label: str) -> None:
+    unexpected = sorted(set(table) - allowed_keys)
+    if unexpected:
+        extras = ", ".join(unexpected)
+        raise ConfigError(f"Unexpected field(s) for {label}: {extras}")
+
+
+def _require_subset_keys(table: dict[str, Any], label: str, allowed_keys: set[str]) -> None:
+    unexpected = sorted(set(table) - allowed_keys)
+    if unexpected:
+        extras = ", ".join(unexpected)
+        raise ConfigError(f"Unexpected table in [{label}]: {extras}")
+
+
+def _optional_absolute_path_or_none(table: dict[str, Any], key: str) -> Path | None:
+    if key not in table:
+        return None
+    return _require_absolute_path(table, key)
 
 
 def _require_child_path(root: Path, child: Path, label: str) -> None:

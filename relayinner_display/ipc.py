@@ -24,12 +24,21 @@ def _is_string(value: object) -> bool:
     return isinstance(value, str)
 
 
+def _is_string_list(value: object) -> bool:
+    return isinstance(value, list) and bool(value) and all(_is_non_empty_string(item) for item in value)
+
+
 def _is_power_state(value: object) -> bool:
     return value in {"on", "off"}
 
 
 DAEMON_TO_SESSION_FIELDS: dict[str, dict[str, Validator]] = {
     "show_waiting": {"reason": _is_non_empty_string},
+    "connect_console": {
+        "backend": _is_non_empty_string,
+        "launcher": _is_non_empty_string,
+        "argv": _is_string_list,
+    },
     "connect_spice": {"vv_path": _is_non_empty_string},
     "disconnect_console": {"reason": _is_non_empty_string},
     "display_power": {"state": _is_power_state, "output": _is_string},
@@ -42,6 +51,11 @@ SESSION_TO_DAEMON_FIELDS: dict[str, dict[str, Validator]] = {
     "console_exited": {"code": _is_integer, "signal": _is_integer},
     "display_power_applied": {"state": _is_power_state},
     "session_error": {"reason": _is_non_empty_string},
+}
+
+SESSION_TO_DAEMON_OPTIONAL_FIELDS: dict[str, dict[str, Validator]] = {
+    "console_started": {"backend": _is_non_empty_string},
+    "console_exited": {"backend": _is_non_empty_string},
 }
 
 
@@ -78,13 +92,19 @@ def validate_daemon_message(message: Mapping[str, object]) -> dict[str, Any]:
 
 
 def validate_session_message(message: Mapping[str, object]) -> dict[str, Any]:
-    return _validate_message(message, SESSION_TO_DAEMON_FIELDS, "session")
+    return _validate_message(
+        message,
+        SESSION_TO_DAEMON_FIELDS,
+        "session",
+        optional_schema=SESSION_TO_DAEMON_OPTIONAL_FIELDS,
+    )
 
 
 def _validate_message(
     message: Mapping[str, object],
     schema: dict[str, dict[str, Validator]],
     source: str,
+    optional_schema: dict[str, dict[str, Validator]] | None = None,
 ) -> dict[str, Any]:
     payload = dict(message)
     message_type = payload.get("type")
@@ -94,7 +114,8 @@ def _validate_message(
         raise IPCError(f"Unsupported {source} message type: {message_type}")
 
     allowed_fields = schema[message_type]
-    expected_keys = {"type", *allowed_fields.keys()}
+    optional_fields = optional_schema.get(message_type, {}) if optional_schema is not None else {}
+    expected_keys = {"type", *allowed_fields.keys(), *optional_fields.keys()}
     unexpected_keys = sorted(set(payload) - expected_keys)
     if unexpected_keys:
         extras = ", ".join(unexpected_keys)
@@ -104,6 +125,10 @@ def _validate_message(
         if field_name not in payload:
             raise IPCError(f"Missing required field {field_name!r} for {message_type}")
         if not validator(payload[field_name]):
+            raise IPCError(f"Invalid value for field {field_name!r} in {message_type}")
+
+    for field_name, validator in optional_fields.items():
+        if field_name in payload and not validator(payload[field_name]):
             raise IPCError(f"Invalid value for field {field_name!r} in {message_type}")
 
     return payload

@@ -30,6 +30,11 @@ WAITING_STATUS_TEXT = {
 DISPLAY_SLEEPING_STATUS = "Display sleeping"
 DEFAULT_WAITING_STATUS = WAITING_STATUS_TEXT["vm_stopped"]
 WLR_RANDR_HELPER = "wlr-randr"
+CONSOLE_LAUNCHER_ALLOWLIST = {
+    "spice": "remote-viewer",
+    "vnc": "remote-viewer",
+    "looking-glass": "looking-glass-client",
+}
 SESSION_ENV_ALLOWLIST = {
     "DBUS_SESSION_BUS_ADDRESS",
     "HOME",
@@ -170,9 +175,11 @@ class SessionSupervisor:
         self.process_factory = process_factory
         self.power_helper = power_helper or config.display.power_helper
         self.power_command_runner = power_command_runner
-        self.viewer_process: subprocess.Popen[str] | None = None
+        self.console_process: subprocess.Popen[str] | None = None
+        self.active_console_backend: str | None = None
         self.view_state = SessionViewState()
         self._suppress_exit_report = False
+        self._send_legacy_console_events = False
 
     def session_ready_message(self) -> dict[str, object]:
         return {"type": "session_ready"}
@@ -198,9 +205,20 @@ class SessionSupervisor:
             )
             return []
 
+        if message_type == "connect_console":
+            return self._launch_console(
+                backend=str(payload["backend"]),
+                launcher=str(payload["launcher"]),
+                argv=[str(argument) for argument in payload["argv"]],
+            )
+
         if message_type == "connect_spice":
-            vv_path = str(payload["vv_path"])
-            return self._launch_console(vv_path)
+            return self._launch_console(
+                backend="spice",
+                launcher="remote-viewer",
+                argv=["remote-viewer", "--full-screen", str(payload["vv_path"])],
+                legacy_events=True,
+            )
 
         if message_type == "display_power":
             return self._apply_display_power(
@@ -214,71 +232,130 @@ class SessionSupervisor:
         raise AssertionError(f"Unhandled daemon message type: {message_type}")
 
     def poll_console(self) -> dict[str, object] | None:
-        if self.viewer_process is None:
+        if self.console_process is None:
             return None
 
-        exit_status = self.viewer_process.poll()
+        exit_status = self.console_process.poll()
         if exit_status is None:
             return None
 
-        self.viewer_process = None
+        backend = self.active_console_backend or self.config.target.console_backend
+        self.console_process = None
+        self.active_console_backend = None
         self.view_state.waiting_reason = "reconnecting"
         self._refresh_view_state()
         if self._suppress_exit_report:
             self._suppress_exit_report = False
+            self._send_legacy_console_events = False
             return None
 
-        event = {
+        event: dict[str, object] = {
             "type": "console_exited",
             "code": max(exit_status, 0),
             "signal": abs(exit_status) if exit_status < 0 else 0,
         }
-        self.console_logger.warning("remote-viewer exited unexpectedly: %s", event)
+        if not self._send_legacy_console_events:
+            event["backend"] = backend
+        self._send_legacy_console_events = False
+        self.console_logger.warning("Console exited unexpectedly: backend=%s event=%s", backend, event)
         return event
 
-    def _launch_console(self, vv_path: str) -> list[dict[str, object]]:
-        self._stop_console(report_exit=False)
-        self.view_state.waiting_reason = "connecting"
-        command = ["remote-viewer", "--full-screen", vv_path]
-
-        try:
-            process = self.process_factory(
-                command,
-                env=build_session_env(),
-                text=True,
-            )
-        except OSError as exc:
-            reason = f"viewer_launch_failed: {exc}"
+    def _launch_console(
+        self,
+        *,
+        backend: str,
+        launcher: str,
+        argv: list[str],
+        legacy_events: bool = False,
+    ) -> list[dict[str, object]]:
+        rejection_reason = self._validate_console_request(
+            backend=backend,
+            launcher=launcher,
+            argv=argv,
+        )
+        if rejection_reason is not None:
             self.view_state.waiting_reason = "degraded"
             self._refresh_view_state()
-            self.console_logger.error("remote-viewer launch failed: %s", exc)
+            self.console_logger.error("%s", rejection_reason)
+            return [{"type": "session_error", "reason": rejection_reason}]
+
+        self._stop_console(report_exit=False)
+        self.view_state.waiting_reason = "connecting"
+        try:
+            process = self.process_factory(argv, env=build_session_env(), text=True)
+        except OSError as exc:
+            reason = f"viewer_launch_failed: backend={backend}: {exc}"
+            self.view_state.waiting_reason = "degraded"
+            self._refresh_view_state()
+            self.console_logger.error("Console launch failed: backend=%s error=%s", backend, exc)
             return [{"type": "session_error", "reason": reason}]
 
-        self.viewer_process = process
+        self.console_process = process
+        self.active_console_backend = backend
         self._suppress_exit_report = False
+        self._send_legacy_console_events = legacy_events
         self._refresh_view_state()
-        self.console_logger.info("remote-viewer started with pid=%s", process.pid)
-        return [{"type": "console_started", "pid": process.pid}]
+        self.console_logger.info(
+            "Console started: backend=%s launcher=%s pid=%s",
+            backend,
+            launcher,
+            process.pid,
+        )
+        event: dict[str, object] = {"type": "console_started", "pid": process.pid}
+        if not legacy_events:
+            event["backend"] = backend
+        return [event]
 
     def _stop_console(self, report_exit: bool) -> None:
-        if self.viewer_process is None:
+        if self.console_process is None:
             self._suppress_exit_report = False
+            self._send_legacy_console_events = False
+            self.active_console_backend = None
             self._refresh_view_state()
             return
 
         self._suppress_exit_report = not report_exit
-        self.viewer_process.terminate()
+        self.console_process.terminate()
         try:
-            self.viewer_process.wait(timeout=2)
+            self.console_process.wait(timeout=2)
         except subprocess.TimeoutExpired:
-            self.viewer_process.kill()
+            self.console_process.kill()
             try:
-                self.viewer_process.wait(timeout=2)
+                self.console_process.wait(timeout=2)
             except subprocess.TimeoutExpired:
-                self.console_logger.warning("remote-viewer did not exit after SIGKILL")
+                self.console_logger.warning("Console process did not exit after SIGKILL")
         finally:
-            self.viewer_process = None
+            self.console_process = None
+            self.active_console_backend = None
+            self._send_legacy_console_events = False
             self._refresh_view_state()
+
+    def _validate_console_request(
+        self,
+        *,
+        backend: str,
+        launcher: str,
+        argv: list[str],
+    ) -> str | None:
+        configured_backend = self.config.target.console_backend
+        if backend != configured_backend:
+            return (
+                "invalid_console_request: "
+                f"backend={backend} does not match configured backend={configured_backend}"
+            )
+
+        allowed_launcher = CONSOLE_LAUNCHER_ALLOWLIST.get(backend)
+        if allowed_launcher is None:
+            return f"invalid_console_request: backend={backend} is not supported"
+
+        launcher_name = Path(launcher).name or launcher
+        argv_launcher_name = Path(argv[0]).name or argv[0]
+        if launcher_name != allowed_launcher or argv_launcher_name != allowed_launcher:
+            return (
+                "invalid_console_request: "
+                f"backend={backend} launcher={launcher} argv0={argv[0]}"
+            )
+        return None
 
     def _apply_display_power(self, state: str, output: str) -> list[dict[str, object]]:
         if display_power_helper_name(self.power_helper) == WLR_RANDR_HELPER:
@@ -379,8 +456,8 @@ class SessionSupervisor:
         return completed
 
     def _refresh_view_state(self) -> None:
-        self.view_state.console_active = self.viewer_process is not None
-        self.view_state.cursor_hidden = self.viewer_process is not None
+        self.view_state.console_active = self.console_process is not None
+        self.view_state.cursor_hidden = self.console_process is not None
         if self.view_state.display_power_state == "off":
             self.view_state.status_text = DISPLAY_SLEEPING_STATUS
             return

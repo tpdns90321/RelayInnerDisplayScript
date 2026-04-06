@@ -6,6 +6,10 @@ import unittest
 
 from relayinner_display.config import (
     AppConfig,
+    ConsoleConfig,
+    ConsoleLookingGlassConfig,
+    ConsoleSpiceConfig,
+    ConsoleVncConfig,
     DisplayConfig,
     InputConfig,
     PolicyConfig,
@@ -41,7 +45,7 @@ class FakeProcess:
 
 
 class SessionSupervisorTests(unittest.TestCase):
-    def test_connect_spice_launches_remote_viewer(self) -> None:
+    def test_connect_console_launches_remote_viewer_for_spice(self) -> None:
         launches: list[tuple[list[str], dict[str, str]]] = []
 
         def fake_factory(command: list[str], env: dict[str, str], text: bool) -> FakeProcess:
@@ -50,17 +54,73 @@ class SessionSupervisorTests(unittest.TestCase):
 
         supervisor = SessionSupervisor(config=build_config(), process_factory=fake_factory)
         events = supervisor.handle_daemon_message(
-            {"type": "connect_spice", "vv_path": "/run/relayinner-display/current.vv"}
+            {
+                "type": "connect_console",
+                "backend": "spice",
+                "launcher": "remote-viewer",
+                "argv": [
+                    "remote-viewer",
+                    "--full-screen",
+                    "/run/relayinner-display/console/spice-current.vv",
+                ],
+            }
         )
 
-        self.assertEqual(events, [{"type": "console_started", "pid": 9001}])
+        self.assertEqual(events, [{"type": "console_started", "backend": "spice", "pid": 9001}])
         self.assertTrue(supervisor.view_state.console_active)
         self.assertTrue(supervisor.view_state.cursor_hidden)
         self.assertEqual(supervisor.view_state.status_text, "Connecting")
         self.assertEqual(
             launches[0][0],
-            ["remote-viewer", "--full-screen", "/run/relayinner-display/current.vv"],
+            ["remote-viewer", "--full-screen", "/run/relayinner-display/console/spice-current.vv"],
         )
+
+    def test_connect_spice_compatibility_emits_legacy_console_started(self) -> None:
+        def fake_factory(command: list[str], env: dict[str, str], text: bool) -> FakeProcess:
+            return FakeProcess(pid=9001)
+
+        supervisor = SessionSupervisor(config=build_config(), process_factory=fake_factory)
+        events = supervisor.handle_daemon_message(
+            {"type": "connect_spice", "vv_path": "/run/relayinner-display/current.vv"}
+        )
+
+        self.assertEqual(events, [{"type": "console_started", "pid": 9001}])
+
+    def test_connect_console_rejects_non_allowlisted_launcher(self) -> None:
+        launches: list[list[str]] = []
+
+        def fake_factory(command: list[str], env: dict[str, str], text: bool) -> FakeProcess:
+            launches.append(command)
+            return FakeProcess(pid=9001)
+
+        supervisor = SessionSupervisor(
+            config=build_config(backend="vnc"),
+            process_factory=fake_factory,
+        )
+        events = supervisor.handle_daemon_message(
+            {
+                "type": "connect_console",
+                "backend": "vnc",
+                "launcher": "looking-glass-client",
+                "argv": ["looking-glass-client"],
+            }
+        )
+
+        self.assertEqual(
+            events,
+            [
+                {
+                    "type": "session_error",
+                    "reason": (
+                        "invalid_console_request: "
+                        "backend=vnc launcher=looking-glass-client argv0=looking-glass-client"
+                    ),
+                }
+            ],
+        )
+        self.assertEqual(launches, [])
+        self.assertFalse(supervisor.view_state.console_active)
+        self.assertEqual(supervisor.view_state.status_text, "Degraded")
 
     def test_intentional_disconnect_suppresses_console_exit_event(self) -> None:
         process = FakeProcess(pid=100)
@@ -70,7 +130,16 @@ class SessionSupervisorTests(unittest.TestCase):
 
         supervisor = SessionSupervisor(config=build_config(), process_factory=fake_factory)
         supervisor.handle_daemon_message(
-            {"type": "connect_spice", "vv_path": "/run/relayinner-display/current.vv"}
+            {
+                "type": "connect_console",
+                "backend": "spice",
+                "launcher": "remote-viewer",
+                "argv": [
+                    "remote-viewer",
+                    "--full-screen",
+                    "/run/relayinner-display/console/spice-current.vv",
+                ],
+            }
         )
         supervisor.handle_daemon_message({"type": "show_waiting", "reason": "vm_stopped"})
 
@@ -79,7 +148,7 @@ class SessionSupervisorTests(unittest.TestCase):
         self.assertEqual(supervisor.view_state.status_text, "Waiting for VM")
         self.assertIsNone(supervisor.poll_console())
 
-    def test_unexpected_exit_reports_console_exited(self) -> None:
+    def test_unexpected_exit_reports_console_exited_with_backend(self) -> None:
         process = FakeProcess(pid=100)
 
         def fake_factory(command: list[str], env: dict[str, str], text: bool) -> FakeProcess:
@@ -87,13 +156,25 @@ class SessionSupervisorTests(unittest.TestCase):
 
         supervisor = SessionSupervisor(config=build_config(), process_factory=fake_factory)
         supervisor.handle_daemon_message(
-            {"type": "connect_spice", "vv_path": "/run/relayinner-display/current.vv"}
+            {
+                "type": "connect_console",
+                "backend": "spice",
+                "launcher": "remote-viewer",
+                "argv": [
+                    "remote-viewer",
+                    "--full-screen",
+                    "/run/relayinner-display/console/spice-current.vv",
+                ],
+            }
         )
         process.returncode = 1
 
         event = supervisor.poll_console()
 
-        self.assertEqual(event, {"type": "console_exited", "code": 1, "signal": 0})
+        self.assertEqual(
+            event,
+            {"type": "console_exited", "backend": "spice", "code": 1, "signal": 0},
+        )
         self.assertEqual(supervisor.view_state.status_text, "Connection lost")
 
     def test_display_power_uses_configured_helper_and_reports_applied(self) -> None:
@@ -206,21 +287,34 @@ class SessionSupervisorTests(unittest.TestCase):
         self.assertEqual(supervisor.view_state.display_power_state, "on")
 
 
-def build_config(power_helper: str = "wlr-randr") -> AppConfig:
+def build_config(
+    *,
+    backend: str = "spice",
+    power_helper: str = "wlr-randr",
+) -> AppConfig:
     run_dir = Path("/run/relayinner-display")
+    console = ConsoleConfig(
+        artifact_dir=run_dir / "console",
+        spice=ConsoleSpiceConfig(vv_path=run_dir / "console" / "spice-current.vv")
+        if backend == "spice"
+        else None,
+        vnc=ConsoleVncConfig() if backend == "vnc" else None,
+        looking_glass=ConsoleLookingGlassConfig() if backend == "looking-glass" else None,
+    )
     return AppConfig(
         target=TargetConfig(
             vmid=101,
             node_name="auto",
             guest_os="windows",
-            console_backend="spice",
+            console_backend=backend,
         ),
         runtime=RuntimeConfig(
             run_dir=run_dir,
             control_socket=run_dir / "session.sock",
-            spice_vv_path=run_dir / "current.vv",
+            spice_vv_path=run_dir / "console" / "spice-current.vv",
             log_namespace="relayinner-display",
         ),
+        console=console,
         display=DisplayConfig(
             output_name="HDMI-A-1",
             power_helper=power_helper,

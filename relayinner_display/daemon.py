@@ -28,7 +28,13 @@ POWER_BUTTON_RUNNING_VM_STATES = {"running", "paused"}
 POWER_BUTTON_STOPPED_VM_STATES = {"stopped", "shutdown"}
 PROXMOX_FAILURE_LIMIT = 5
 PROXMOX_FAILURE_WINDOW = timedelta(minutes=2)
-REQUIRED_DAEMON_BINARIES = ("remote-viewer",)
+CONSOLE_LAUNCHERS = {
+    "spice": "remote-viewer",
+    "vnc": "remote-viewer",
+    "looking-glass": "looking-glass-client",
+}
+IMPLEMENTED_CONSOLE_BACKENDS = {"spice"}
+REQUIRED_DAEMON_BINARIES: tuple[str, ...] = ()
 
 
 def utcnow() -> datetime:
@@ -154,7 +160,11 @@ class DisplayDaemon:
         self.console_logger = subsystem_logger(self.namespace, "console")
         self.display_logger = subsystem_logger(self.namespace, "display")
         self.input_logger = subsystem_logger(self.namespace, "input")
-        self.state = RuntimeState(vmid=config.target.vmid, node_name="")
+        self.state = RuntimeState(
+            vmid=config.target.vmid,
+            node_name="",
+            console_backend=config.target.console_backend,
+        )
         self.session_ready = False
         self.console_running = False
         self.console_pid: int | None = None
@@ -179,11 +189,11 @@ class DisplayDaemon:
         self.config.runtime.run_dir.mkdir(parents=True, exist_ok=True)
         os.chmod(self.config.runtime.run_dir, 0o750)
         chown_if_present(self.config.runtime.run_dir, SESSION_USER, SESSION_GROUP, self.logger)
+        self.config.console.artifact_dir.mkdir(parents=True, exist_ok=True)
+        os.chmod(self.config.console.artifact_dir, 0o750)
+        chown_if_present(self.config.console.artifact_dir, SESSION_USER, SESSION_GROUP, self.logger)
 
-        for path in (
-            self.config.runtime.control_socket,
-            self.config.runtime.spice_vv_path,
-        ):
+        for path in (self.config.runtime.control_socket, *self._configured_console_artifact_paths()):
             if path.exists():
                 path.unlink()
 
@@ -209,15 +219,17 @@ class DisplayDaemon:
         self._transition(SessionState.WAITING_FOR_SESSION)
         self._persist_state()
         self.session_logger.info(
-            "Daemon started for VM %s on node %s",
+            "Daemon started for VM %s on node %s with backend=%s",
             self.state.vmid,
             self.state.node_name,
+            self.config.target.console_backend,
         )
 
     def on_session_disconnected(self) -> None:
         self.session_ready = False
         self.console_running = False
         self.console_pid = None
+        self.state.active_console_backend = None
         if self.startup_error is not None or self.state.degraded_reason is not None:
             self._transition(SessionState.DEGRADED)
         else:
@@ -238,6 +250,7 @@ class DisplayDaemon:
             self.session_ready = True
             self.console_running = False
             self.console_pid = None
+            self.state.active_console_backend = None
             self.session_logger.info("Session ready")
             if self.startup_error is not None or self.state.degraded_reason is not None:
                 self._transition(SessionState.DEGRADED)
@@ -270,14 +283,20 @@ class DisplayDaemon:
             return responses
 
         if message_type == "console_started":
+            backend = str(payload.get("backend") or self.config.target.console_backend)
             self.console_running = True
             self.console_pid = int(payload["pid"])
+            self.state.active_console_backend = backend
             self.next_reconnect_at = None
             self.current_reconnect_delay_ms = self.config.policy.reconnect_initial_ms
             self.state.last_error = None
             self._transition(SessionState.SHOWING_CONSOLE)
             self._persist_state()
-            self.console_logger.info("remote-viewer started with pid=%s", self.console_pid)
+            self.console_logger.info(
+                "Console started: backend=%s pid=%s",
+                backend,
+                self.console_pid,
+            )
             return []
 
         if message_type == "display_power_applied":
@@ -289,13 +308,19 @@ class DisplayDaemon:
             return []
 
         if message_type == "console_exited":
+            backend = str(
+                payload.get("backend")
+                or self.state.active_console_backend
+                or self.config.target.console_backend
+            )
             self.console_running = False
             self.console_pid = None
+            self.state.active_console_backend = None
             exit_code = int(payload["code"])
             exit_signal = int(payload["signal"])
-            self.state.mark_console_exit(timestamp, exit_code, exit_signal)
+            self.state.mark_console_exit(timestamp, exit_code, exit_signal, backend)
             self.state.last_error = (
-                f"remote-viewer exited unexpectedly (code={exit_code}, signal={exit_signal})"
+                f"Console backend={backend} exited unexpectedly (code={exit_code}, signal={exit_signal})"
             )
             if self._vm_can_show_console(self.state.vm_power_state):
                 self._schedule_reconnect(timestamp)
@@ -338,6 +363,7 @@ class DisplayDaemon:
             if self.console_running:
                 self.console_running = False
                 self.console_pid = None
+                self.state.active_console_backend = None
                 actions_for_session.append({"type": "disconnect_console", "reason": "vm_not_running"})
             if self.state.session_state not in (
                 SessionState.WAITING_FOR_VM,
@@ -365,20 +391,16 @@ class DisplayDaemon:
             self._persist_state()
             return actions + display_actions
 
+        backend = self.config.target.console_backend
+        if backend not in IMPLEMENTED_CONSOLE_BACKENDS:
+            return actions + display_actions + self._enter_degraded(
+                f"Console preparation failed for backend={backend}: not implemented",
+                subsystem="console",
+            )
+
         try:
             self._transition(SessionState.REQUESTING_CONSOLE)
-            spice_config = self.proxmox.request_spice_config(
-                self.state.node_name,
-                self.config.target.vmid,
-            )
-            self.proxmox.write_vv_file(self.config.runtime.spice_vv_path, spice_config)
-            os.chmod(self.config.runtime.spice_vv_path, 0o640)
-            chown_if_present(
-                self.config.runtime.spice_vv_path,
-                SESSION_USER,
-                SESSION_GROUP,
-                self.logger,
-            )
+            connect_message = self._prepare_console_launch()
         except ProxmoxCommandError as exc:
             return actions + display_actions + self._record_proxmox_failure(timestamp, str(exc))
 
@@ -388,10 +410,12 @@ class DisplayDaemon:
         self.next_reconnect_at = None
         self._transition(SessionState.REQUESTING_CONSOLE)
         self._persist_state()
-        self.console_logger.info("Prepared SPICE config for VM %s", self.state.vmid)
-        return actions + display_actions + [
-            {"type": "connect_spice", "vv_path": str(self.config.runtime.spice_vv_path)}
-        ]
+        self.console_logger.info(
+            "Prepared console launch for VM %s with backend=%s",
+            self.state.vmid,
+            backend,
+        )
+        return actions + display_actions + [connect_message]
 
     def close(self) -> None:
         if self.power_button_source is not None:
@@ -601,6 +625,7 @@ class DisplayDaemon:
         had_console = self.console_running or self.console_pid is not None
         self.console_running = False
         self.console_pid = None
+        self.state.active_console_backend = None
         self.state.last_error = reason
         self.state.degraded_reason = reason
         self._transition(SessionState.DEGRADED)
@@ -626,8 +651,45 @@ class DisplayDaemon:
             self.state.mark_power_state_since(now)
         self.state.vm_power_state = vm_status
 
+    def _configured_console_artifact_paths(self) -> tuple[Path, ...]:
+        if self.config.target.console_backend == "spice":
+            return (self._spice_vv_path(),)
+        return ()
+
+    def _spice_vv_path(self) -> Path:
+        if self.config.console.spice is not None:
+            return self.config.console.spice.vv_path
+        return self.config.runtime.spice_vv_path
+
+    def _prepare_console_launch(self) -> dict[str, object]:
+        backend = self.config.target.console_backend
+        if backend != "spice":
+            raise AssertionError(f"Unhandled console backend: {backend}")
+
+        spice_vv_path = self._spice_vv_path()
+        spice_config = self.proxmox.request_spice_config(
+            self.state.node_name,
+            self.config.target.vmid,
+        )
+        self.proxmox.write_vv_file(spice_vv_path, spice_config)
+        os.chmod(spice_vv_path, 0o640)
+        chown_if_present(
+            spice_vv_path,
+            SESSION_USER,
+            SESSION_GROUP,
+            self.logger,
+        )
+        return {
+            "type": "connect_console",
+            "backend": backend,
+            "launcher": CONSOLE_LAUNCHERS[backend],
+            "argv": [CONSOLE_LAUNCHERS[backend], "--full-screen", str(spice_vv_path)],
+        }
+
     def _validate_runtime_dependencies(self) -> None:
         required = [*REQUIRED_DAEMON_BINARIES, self.config.display.power_helper]
+        if self.config.target.console_backend in IMPLEMENTED_CONSOLE_BACKENDS:
+            required.append(CONSOLE_LAUNCHERS[self.config.target.console_backend])
         seen: set[str] = set()
         for binary in required:
             if binary in seen:
