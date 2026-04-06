@@ -6,7 +6,7 @@ This MVP supports one deployment path: direct installation onto a Proxmox VE hos
 
 - Proxmox VE host with `systemd`
 - root shell access
-- A target VM that exposes either a SPICE display, an operator-prepared loopback-only VNC endpoint, or a fully operator-prepared Looking Glass guest
+- A target VM that exposes either a SPICE display, an operator-prepared loopback-only VNC endpoint, a fully operator-prepared Looking Glass guest, or a Sunshine host reachable from the Proxmox host for Moonlight
 - Package sources that can install:
   - `python3`
   - `python3-evdev`
@@ -14,6 +14,8 @@ This MVP supports one deployment path: direct installation onto a Proxmox VE hos
   - `seatd`
   - `virt-viewer`
   - `wlr-randr`
+
+When `console_backend = "moonlight"`, operators also need Linux `moonlight-qt` version `6.0.0` or newer. The installer does not add that package for you.
 
 ## Install
 
@@ -25,6 +27,7 @@ This MVP supports one deployment path: direct installation onto a Proxmox VE hos
    - `[target].console_backend` if you are switching from the default SPICE path
    - `[console.vnc].display_number` plus matching VM `args: -vnc 127.0.0.1:<display_number>` when using `console_backend = "vnc"`
    - `[console.looking_glass].shm_file` plus any renderer or SPICE overrides when using `console_backend = "looking-glass"`
+   - `[console.moonlight].host` plus any non-default `app`, `base_port`, or `state_dir` when using `console_backend = "moonlight"`
    - `[display].output_name` if you want to pin a specific connector name; this is recommended when the default `wlr-randr` helper should target one physical connector only
    - `[input].power_button_event` if the default evdev path does not match the host
 4. Start the services after editing the config:
@@ -93,6 +96,33 @@ For the required host and guest preparation, follow the upstream documentation:
 
 - <https://looking-glass.io/docs/stable/requirements/>
 - <https://looking-glass.io/docs/stable/install_client/>
+
+## Moonlight Backend
+
+Use `console_backend = "moonlight"` only after the guest already runs Sunshine and the Proxmox host already has Linux `moonlight-qt` version `6.0.0` or newer. This Spec 30 slice intentionally covers only the backend contract, managed workspace, and direct `moonlight stream` launch:
+
+- the installer does not configure Sunshine inside the guest
+- the installer does not automate Moonlight pairing
+- this path targets Linux `moonlight-qt`, not mobile clients or browser flows
+
+Configure the relay like this:
+
+```toml
+[target]
+console_backend = "moonlight"
+
+[console.moonlight]
+binary = "moonlight"
+host = "192.168.50.20"
+base_port = 47989
+app = "Desktop"
+state_dir = "/var/lib/relayinner-display/moonlight"
+quit_app_after_session = false
+```
+
+At runtime the daemon verifies that the configured Moonlight binary exists and reports version `6.0.0` or newer, prepares `state_dir` plus `portable.dat`, and launches `moonlight stream <host-authority> <app> --display-mode fullscreen` from that managed workspace. If `base_port` differs from `47989`, the relay renders `host:port` for hostnames and IPv4 or `[ipv6]:port` for IPv6 literals before invoking Moonlight.
+
+Sunshine setup and any required pairing state in the managed Moonlight workspace remain operator-managed in this slice. Specs 31 and 32 are reserved for pair-assist and richer Moonlight launch/recovery behavior.
 
 ## Uninstall
 
@@ -220,7 +250,7 @@ When the appliance is not showing the guest, inspect the state file first:
 Then inspect journald by subsystem:
 
 - `relayinner-display.proxmox` for `qm`/`pvesh` failures and retry exhaustion
-- `relayinner-display.console` for `remote-viewer` or `looking-glass-client` launch, exit, and preflight problems
+- `relayinner-display.console` for `remote-viewer`, `looking-glass-client`, or `moonlight` launch, exit, and preflight problems
 - `relayinner-display.display` for display power helper failures
 - `relayinner-display.input` for host power-button validation or evdev read failures
 - `relayinner-display.session` for session connection and state-transition events
@@ -246,3 +276,5 @@ If the VNC backend stays in the reconnecting path while the VM is running, inspe
 If the state file or journal shows `console_backend=looking-glass` and the appliance moves into `degraded`, verify that `looking_glass_shm_file` matches the expected KVMFR or IVSHMEM device, that the file already exists before the daemon starts, and that the `relayinner-display` session user can read it. Missing or unreadable shared memory is treated as a hard preflight failure by design.
 
 If Looking Glass reconnects repeatedly while the guest stays up, inspect the console log lines for `backend=looking-glass` and confirm the guest-side host application plus upstream passthrough setup are healthy. The relay only validates host-visible prerequisites; it does not diagnose guest-side capture or passthrough failures beyond that boundary.
+
+If the state file or journal shows `console_backend=moonlight` and the appliance moves into `degraded`, verify that Linux `moonlight-qt` `6.0.0` or newer is installed, that `[console.moonlight].host` and `base_port` point at the expected Sunshine host, and that the configured `state_dir` plus `portable.dat` are present and writable by the `relayinner-display` session user. The current implementation prepares the workspace and launches Moonlight from it, but any required pairing state inside that workspace is still operator-managed.

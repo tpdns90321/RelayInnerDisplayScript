@@ -210,6 +210,7 @@ class SessionSupervisor:
                 backend=str(payload["backend"]),
                 launcher=str(payload["launcher"]),
                 argv=[str(argument) for argument in payload["argv"]],
+                cwd=Path(str(payload["cwd"])) if "cwd" in payload else None,
             )
 
         if message_type == "connect_spice":
@@ -266,6 +267,7 @@ class SessionSupervisor:
         backend: str,
         launcher: str,
         argv: list[str],
+        cwd: Path | None = None,
         legacy_events: bool = False,
     ) -> list[dict[str, object]]:
         rejection_reason = self._validate_console_request(
@@ -282,7 +284,12 @@ class SessionSupervisor:
         self._stop_console(report_exit=False)
         self.view_state.waiting_reason = "connecting"
         try:
-            process = self.process_factory(argv, env=build_session_env(), text=True)
+            process = self.process_factory(
+                argv,
+                cwd=str(cwd) if cwd is not None else None,
+                env=build_session_env(),
+                text=True,
+            )
         except OSError as exc:
             reason = f"viewer_launch_failed: backend={backend}: {exc}"
             self.view_state.waiting_reason = "degraded"
@@ -345,6 +352,17 @@ class SessionSupervisor:
             )
 
         allowed_launcher = CONSOLE_LAUNCHER_ALLOWLIST.get(backend)
+        if backend == "moonlight":
+            moonlight = self.config.console.moonlight
+            if moonlight is None:
+                return "invalid_console_request: backend=moonlight is not configured"
+            if launcher != moonlight.binary or argv[0] != moonlight.binary:
+                return (
+                    "invalid_console_request: "
+                    f"backend={backend} launcher={launcher} argv0={argv[0]}"
+                )
+            return None
+
         if allowed_launcher is None:
             return f"invalid_console_request: backend={backend} is not supported"
 

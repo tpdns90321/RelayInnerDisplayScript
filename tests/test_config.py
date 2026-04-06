@@ -145,7 +145,7 @@ class ConfigTests(unittest.TestCase):
             with self.assertRaises(ConfigError):
                 load_config(config_path)
 
-    def test_accepts_vnc_and_looking_glass_backends(self) -> None:
+    def test_accepts_vnc_looking_glass_and_moonlight_backends(self) -> None:
         content = VALID_CONFIG.replace('console_backend = "spice"', 'console_backend = "vnc"')
         content = content.replace(
             "[console.spice]\nvv_path = \"/run/relayinner-display/console/spice-current.vv\"\n",
@@ -194,6 +194,30 @@ class ConfigTests(unittest.TestCase):
         self.assertFalse(config.console.looking_glass.disable_host_screensaver)
         self.assertFalse(config.console.looking_glass.spice_enabled)
 
+        content = VALID_CONFIG.replace('console_backend = "spice"', 'console_backend = "moonlight"')
+        content = content.replace(
+            "[console.spice]\nvv_path = \"/run/relayinner-display/console/spice-current.vv\"\n",
+            "[console.moonlight]\nhost = \"192.168.50.20\"\n",
+        )
+        with TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "config.toml"
+            config_path.write_text(content, encoding="utf-8")
+            config = load_config(config_path)
+
+        self.assertEqual(config.target.console_backend, "moonlight")
+        self.assertIsNotNone(config.console.moonlight)
+        self.assertIsNone(config.console.spice)
+        self.assertEqual(config.console.moonlight.binary, "moonlight")
+        self.assertEqual(config.console.moonlight.host, "192.168.50.20")
+        self.assertEqual(config.console.moonlight.base_port, 47989)
+        self.assertEqual(config.console.moonlight.app, "Desktop")
+        self.assertEqual(
+            config.console.moonlight.state_dir,
+            Path("/var/lib/relayinner-display/moonlight"),
+        )
+        self.assertFalse(config.console.moonlight.quit_app_after_session)
+        self.assertEqual(config.console.moonlight.host_authority, "192.168.50.20")
+
     def test_looking_glass_defaults_are_applied(self) -> None:
         content = VALID_CONFIG.replace('console_backend = "spice"', 'console_backend = "looking-glass"')
         content = content.replace(
@@ -211,6 +235,43 @@ class ConfigTests(unittest.TestCase):
         self.assertTrue(config.console.looking_glass.fullscreen)
         self.assertTrue(config.console.looking_glass.disable_host_screensaver)
         self.assertTrue(config.console.looking_glass.spice_enabled)
+
+    def test_moonlight_custom_values_are_applied(self) -> None:
+        content = VALID_CONFIG.replace('console_backend = "spice"', 'console_backend = "moonlight"')
+        content = content.replace(
+            "[console.spice]\nvv_path = \"/run/relayinner-display/console/spice-current.vv\"\n",
+            textwrap.dedent(
+                """\
+                [console.moonlight]
+                binary = "/usr/local/bin/moonlight"
+                host = "2001:db8::20"
+                base_port = 48010
+                app = "Steam Big Picture"
+                state_dir = "/var/lib/relayinner-display/custom-moonlight"
+                quit_app_after_session = true
+                """
+            ),
+        )
+
+        with TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "config.toml"
+            config_path.write_text(content, encoding="utf-8")
+            config = load_config(config_path)
+
+        self.assertEqual(config.console.moonlight.binary, "/usr/local/bin/moonlight")
+        self.assertEqual(config.console.moonlight.host, "2001:db8::20")
+        self.assertEqual(config.console.moonlight.base_port, 48010)
+        self.assertEqual(config.console.moonlight.app, "Steam Big Picture")
+        self.assertEqual(
+            config.console.moonlight.state_dir,
+            Path("/var/lib/relayinner-display/custom-moonlight"),
+        )
+        self.assertTrue(config.console.moonlight.quit_app_after_session)
+        self.assertEqual(config.console.moonlight.host_authority, "[2001:db8::20]:48010")
+        self.assertEqual(
+            config.console.moonlight.portable_marker_path,
+            Path("/var/lib/relayinner-display/custom-moonlight/portable.dat"),
+        )
 
     def test_legacy_runtime_spice_vv_path_is_accepted_for_spice_only(self) -> None:
         content = """
@@ -359,6 +420,72 @@ class ConfigTests(unittest.TestCase):
         content = content.replace(
             "[console.spice]\nvv_path = \"/run/relayinner-display/console/spice-current.vv\"\n",
             "[console.looking_glass]\nshm_file = \"/dev/kvmfr0\"\nbinary = \"\"\n",
+        )
+        with TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "config.toml"
+            config_path.write_text(content, encoding="utf-8")
+
+            with self.assertRaises(ConfigError):
+                load_config(config_path)
+
+    def test_moonlight_host_must_be_valid(self) -> None:
+        for host in ("", "https://sunshine.example", "[2001:db8::20]", "bad host"):
+            with self.subTest(host=host):
+                content = VALID_CONFIG.replace(
+                    'console_backend = "spice"',
+                    'console_backend = "moonlight"',
+                )
+                content = content.replace(
+                    "[console.spice]\nvv_path = \"/run/relayinner-display/console/spice-current.vv\"\n",
+                    f"[console.moonlight]\nhost = \"{host}\"\n",
+                )
+                with TemporaryDirectory() as temp_dir:
+                    config_path = Path(temp_dir) / "config.toml"
+                    config_path.write_text(content, encoding="utf-8")
+
+                    with self.assertRaises(ConfigError):
+                        load_config(config_path)
+
+    def test_moonlight_state_dir_must_be_absolute(self) -> None:
+        content = VALID_CONFIG.replace('console_backend = "spice"', 'console_backend = "moonlight"')
+        content = content.replace(
+            "[console.spice]\nvv_path = \"/run/relayinner-display/console/spice-current.vv\"\n",
+            "[console.moonlight]\nhost = \"192.168.50.20\"\nstate_dir = \"moonlight\"\n",
+        )
+        with TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "config.toml"
+            config_path.write_text(content, encoding="utf-8")
+
+            with self.assertRaises(ConfigError):
+                load_config(config_path)
+
+    def test_moonlight_base_port_must_be_in_range(self) -> None:
+        for base_port in ("0", "65536"):
+            with self.subTest(base_port=base_port):
+                content = VALID_CONFIG.replace(
+                    'console_backend = "spice"',
+                    'console_backend = "moonlight"',
+                )
+                content = content.replace(
+                    "[console.spice]\nvv_path = \"/run/relayinner-display/console/spice-current.vv\"\n",
+                    (
+                        "[console.moonlight]\n"
+                        "host = \"192.168.50.20\"\n"
+                        f"base_port = {base_port}\n"
+                    ),
+                )
+                with TemporaryDirectory() as temp_dir:
+                    config_path = Path(temp_dir) / "config.toml"
+                    config_path.write_text(content, encoding="utf-8")
+
+                    with self.assertRaises(ConfigError):
+                        load_config(config_path)
+
+    def test_moonlight_binary_must_be_bare_name_or_absolute_path(self) -> None:
+        content = VALID_CONFIG.replace('console_backend = "spice"', 'console_backend = "moonlight"')
+        content = content.replace(
+            "[console.spice]\nvv_path = \"/run/relayinner-display/console/spice-current.vv\"\n",
+            "[console.moonlight]\nhost = \"192.168.50.20\"\nbinary = \"./moonlight\"\n",
         )
         with TemporaryDirectory() as temp_dir:
             config_path = Path(temp_dir) / "config.toml"

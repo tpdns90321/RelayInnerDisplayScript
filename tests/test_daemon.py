@@ -12,6 +12,7 @@ from relayinner_display.config import (
     AppConfig,
     ConsoleConfig,
     ConsoleLookingGlassConfig,
+    ConsoleMoonlightConfig,
     ConsoleSpiceConfig,
     ConsoleVncConfig,
     DisplayConfig,
@@ -431,6 +432,145 @@ class DisplayDaemonTests(unittest.TestCase):
                     ],
                 }
             ],
+        )
+
+    def test_prepare_runtime_creates_moonlight_workspace_and_portable_marker(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            state_dir = Path(temp_dir) / "moonlight-state"
+            config = build_config(
+                Path(temp_dir),
+                backend="moonlight",
+                moonlight_state_dir=state_dir,
+            )
+            daemon = DisplayDaemon(config=config, proxmox=FakeProxmoxClient(["stopped"]))
+
+            daemon.prepare_runtime()
+            self.assertTrue(state_dir.is_dir())
+            self.assertTrue((state_dir / "portable.dat").is_file())
+            self.assertEqual(state_dir.stat().st_mode & 0o777, 0o700)
+            self.assertEqual((state_dir / "portable.dat").stat().st_mode & 0o777, 0o600)
+
+    def test_running_vm_connects_with_moonlight_launch_contract(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            state_dir = Path(temp_dir) / "moonlight-state"
+            config = build_config(
+                Path(temp_dir),
+                backend="moonlight",
+                moonlight_host="2001:db8::10",
+                moonlight_base_port=48010,
+                moonlight_state_dir=state_dir,
+            )
+            version_commands: list[list[str]] = []
+
+            def fake_command_runner(
+                command: list[str],
+                text: bool,
+                capture_output: bool,
+                check: bool,
+            ) -> SimpleNamespace:
+                version_commands.append(command)
+                return SimpleNamespace(
+                    returncode=0,
+                    stdout="Moonlight 6.1.0\n",
+                    stderr="",
+                )
+
+            daemon = DisplayDaemon(
+                config=config,
+                proxmox=FakeProxmoxClient(["running"]),
+                dependency_finder=lambda name: f"/usr/bin/{Path(name).name}",
+                command_runner=fake_command_runner,
+            )
+            start_time = datetime(2026, 4, 4, 0, 0, tzinfo=timezone.utc)
+
+            daemon.prepare_runtime()
+            daemon.start(now=start_time)
+
+            ready_actions = daemon.handle_session_message({"type": "session_ready"}, now=start_time)
+            self.assertEqual(
+                ready_actions,
+                [
+                    {"type": "display_power", "state": "on", "output": ""},
+                    {"type": "show_waiting", "reason": "connecting"},
+                ],
+            )
+
+            tick_actions = daemon.tick(now=start_time)
+
+        self.assertEqual(version_commands, [["/usr/bin/moonlight", "--version"]])
+        self.assertEqual(
+            tick_actions,
+            [
+                {
+                    "type": "connect_console",
+                    "backend": "moonlight",
+                    "launcher": "moonlight",
+                    "cwd": str(state_dir),
+                    "argv": [
+                        "moonlight",
+                        "stream",
+                        "[2001:db8::10]:48010",
+                        "Desktop",
+                        "--display-mode",
+                        "fullscreen",
+                    ],
+                }
+            ],
+        )
+
+    def test_moonlight_missing_binary_enters_degraded_at_startup(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            config = build_config(Path(temp_dir), backend="moonlight")
+            daemon = DisplayDaemon(
+                config=config,
+                proxmox=FakeProxmoxClient(["running"]),
+                dependency_finder=lambda name: (
+                    None if name == "moonlight" else f"/usr/bin/{Path(name).name}"
+                ),
+            )
+            start_time = datetime(2026, 4, 4, 0, 0, tzinfo=timezone.utc)
+
+            daemon.prepare_runtime()
+            daemon.start(now=start_time)
+            actions = daemon.handle_session_message({"type": "session_ready"}, now=start_time)
+
+        self.assertEqual(actions, [{"type": "show_waiting", "reason": "degraded"}])
+        self.assertEqual(daemon.state.session_state, SessionState.DEGRADED)
+        self.assertEqual(daemon.state.degraded_reason, "Missing required binary: moonlight")
+
+    def test_moonlight_old_version_enters_degraded_at_startup(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            config = build_config(Path(temp_dir), backend="moonlight")
+
+            def fake_command_runner(
+                command: list[str],
+                text: bool,
+                capture_output: bool,
+                check: bool,
+            ) -> SimpleNamespace:
+                return SimpleNamespace(
+                    returncode=0,
+                    stdout="Moonlight 5.0.1\n",
+                    stderr="",
+                )
+
+            daemon = DisplayDaemon(
+                config=config,
+                proxmox=FakeProxmoxClient(["running"]),
+                dependency_finder=lambda name: f"/usr/bin/{Path(name).name}",
+                command_runner=fake_command_runner,
+            )
+            start_time = datetime(2026, 4, 4, 0, 0, tzinfo=timezone.utc)
+
+            daemon.prepare_runtime()
+            daemon.start(now=start_time)
+            actions = daemon.handle_session_message({"type": "session_ready"}, now=start_time)
+
+        self.assertEqual(actions, [{"type": "show_waiting", "reason": "degraded"}])
+        self.assertEqual(daemon.state.session_state, SessionState.DEGRADED)
+        self.assertEqual(
+            daemon.state.degraded_reason,
+            "Moonlight version must be >= 6.0.0, found 5.0.1",
         )
 
     def test_initial_off_state_waits_before_sleeping(self) -> None:
@@ -1051,6 +1191,12 @@ def build_config(
     looking_glass_fullscreen: bool = True,
     looking_glass_disable_host_screensaver: bool = True,
     looking_glass_spice_enabled: bool = True,
+    moonlight_binary: str = "moonlight",
+    moonlight_host: str = "192.168.50.20",
+    moonlight_base_port: int = 47989,
+    moonlight_app: str = "Desktop",
+    moonlight_state_dir: Path | None = None,
+    moonlight_quit_app_after_session: bool = False,
     output_name: str = "",
     power_helper: str = "wlr-randr",
     dpms_off_delay_ms: int = 5000,
@@ -1080,6 +1226,16 @@ def build_config(
             spice_enabled=looking_glass_spice_enabled,
         )
         if backend == "looking-glass"
+        else None,
+        moonlight=ConsoleMoonlightConfig(
+            binary=moonlight_binary,
+            host=moonlight_host,
+            base_port=moonlight_base_port,
+            app=moonlight_app,
+            state_dir=moonlight_state_dir or root / "moonlight-state",
+            quit_app_after_session=moonlight_quit_app_after_session,
+        )
+        if backend == "moonlight"
         else None,
     )
     return AppConfig(

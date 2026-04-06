@@ -8,6 +8,7 @@ from relayinner_display.config import (
     AppConfig,
     ConsoleConfig,
     ConsoleLookingGlassConfig,
+    ConsoleMoonlightConfig,
     ConsoleSpiceConfig,
     ConsoleVncConfig,
     DisplayConfig,
@@ -46,10 +47,15 @@ class FakeProcess:
 
 class SessionSupervisorTests(unittest.TestCase):
     def test_connect_console_launches_remote_viewer_for_spice(self) -> None:
-        launches: list[tuple[list[str], dict[str, str]]] = []
+        launches: list[tuple[list[str], str | None, dict[str, str]]] = []
 
-        def fake_factory(command: list[str], env: dict[str, str], text: bool) -> FakeProcess:
-            launches.append((command, env))
+        def fake_factory(
+            command: list[str],
+            cwd: str | None = None,
+            env: dict[str, str] | None = None,
+            text: bool = True,
+        ) -> FakeProcess:
+            launches.append((command, cwd, env or {}))
             return FakeProcess(pid=9001)
 
         supervisor = SessionSupervisor(config=build_config(), process_factory=fake_factory)
@@ -76,10 +82,15 @@ class SessionSupervisorTests(unittest.TestCase):
         )
 
     def test_connect_console_launches_remote_viewer_for_vnc(self) -> None:
-        launches: list[tuple[list[str], dict[str, str]]] = []
+        launches: list[tuple[list[str], str | None, dict[str, str]]] = []
 
-        def fake_factory(command: list[str], env: dict[str, str], text: bool) -> FakeProcess:
-            launches.append((command, env))
+        def fake_factory(
+            command: list[str],
+            cwd: str | None = None,
+            env: dict[str, str] | None = None,
+            text: bool = True,
+        ) -> FakeProcess:
+            launches.append((command, cwd, env or {}))
             return FakeProcess(pid=9002)
 
         supervisor = SessionSupervisor(
@@ -106,10 +117,15 @@ class SessionSupervisorTests(unittest.TestCase):
         )
 
     def test_connect_console_launches_looking_glass_client(self) -> None:
-        launches: list[tuple[list[str], dict[str, str]]] = []
+        launches: list[tuple[list[str], str | None, dict[str, str]]] = []
 
-        def fake_factory(command: list[str], env: dict[str, str], text: bool) -> FakeProcess:
-            launches.append((command, env))
+        def fake_factory(
+            command: list[str],
+            cwd: str | None = None,
+            env: dict[str, str] | None = None,
+            text: bool = True,
+        ) -> FakeProcess:
+            launches.append((command, cwd, env or {}))
             return FakeProcess(pid=9003)
 
         supervisor = SessionSupervisor(
@@ -142,8 +158,60 @@ class SessionSupervisorTests(unittest.TestCase):
             ["looking-glass-client", "-F", "-S", "-g", "auto", "-f", "/dev/kvmfr0"],
         )
 
+    def test_connect_console_launches_moonlight_from_workspace(self) -> None:
+        launches: list[tuple[list[str], str | None, dict[str, str]]] = []
+
+        def fake_factory(
+            command: list[str],
+            cwd: str | None = None,
+            env: dict[str, str] | None = None,
+            text: bool = True,
+        ) -> FakeProcess:
+            launches.append((command, cwd, env or {}))
+            return FakeProcess(pid=9004)
+
+        supervisor = SessionSupervisor(
+            config=build_config(backend="moonlight"),
+            process_factory=fake_factory,
+        )
+        events = supervisor.handle_daemon_message(
+            {
+                "type": "connect_console",
+                "backend": "moonlight",
+                "launcher": "moonlight",
+                "cwd": "/var/lib/relayinner-display/moonlight",
+                "argv": [
+                    "moonlight",
+                    "stream",
+                    "192.168.50.20",
+                    "Desktop",
+                    "--display-mode",
+                    "fullscreen",
+                ],
+            }
+        )
+
+        self.assertEqual(events, [{"type": "console_started", "backend": "moonlight", "pid": 9004}])
+        self.assertEqual(
+            launches[0][0],
+            [
+                "moonlight",
+                "stream",
+                "192.168.50.20",
+                "Desktop",
+                "--display-mode",
+                "fullscreen",
+            ],
+        )
+        self.assertEqual(launches[0][1], "/var/lib/relayinner-display/moonlight")
+
     def test_connect_spice_compatibility_emits_legacy_console_started(self) -> None:
-        def fake_factory(command: list[str], env: dict[str, str], text: bool) -> FakeProcess:
+        def fake_factory(
+            command: list[str],
+            cwd: str | None = None,
+            env: dict[str, str] | None = None,
+            text: bool = True,
+        ) -> FakeProcess:
             return FakeProcess(pid=9001)
 
         supervisor = SessionSupervisor(config=build_config(), process_factory=fake_factory)
@@ -156,7 +224,12 @@ class SessionSupervisorTests(unittest.TestCase):
     def test_connect_console_rejects_non_allowlisted_launcher(self) -> None:
         launches: list[list[str]] = []
 
-        def fake_factory(command: list[str], env: dict[str, str], text: bool) -> FakeProcess:
+        def fake_factory(
+            command: list[str],
+            cwd: str | None = None,
+            env: dict[str, str] | None = None,
+            text: bool = True,
+        ) -> FakeProcess:
             launches.append(command)
             return FakeProcess(pid=9001)
 
@@ -189,10 +262,65 @@ class SessionSupervisorTests(unittest.TestCase):
         self.assertFalse(supervisor.view_state.console_active)
         self.assertEqual(supervisor.view_state.status_text, "Degraded")
 
+    def test_connect_console_rejects_moonlight_argv0_mismatch(self) -> None:
+        launches: list[list[str]] = []
+
+        def fake_factory(
+            command: list[str],
+            cwd: str | None = None,
+            env: dict[str, str] | None = None,
+            text: bool = True,
+        ) -> FakeProcess:
+            launches.append(command)
+            return FakeProcess(pid=9005)
+
+        supervisor = SessionSupervisor(
+            config=build_config(
+                backend="moonlight",
+                moonlight_binary="/usr/local/bin/moonlight",
+            ),
+            process_factory=fake_factory,
+        )
+        events = supervisor.handle_daemon_message(
+            {
+                "type": "connect_console",
+                "backend": "moonlight",
+                "launcher": "/usr/local/bin/moonlight",
+                "cwd": "/var/lib/relayinner-display/moonlight",
+                "argv": [
+                    "moonlight",
+                    "stream",
+                    "192.168.50.20",
+                    "Desktop",
+                    "--display-mode",
+                    "fullscreen",
+                ],
+            }
+        )
+
+        self.assertEqual(
+            events,
+            [
+                {
+                    "type": "session_error",
+                    "reason": (
+                        "invalid_console_request: "
+                        "backend=moonlight launcher=/usr/local/bin/moonlight argv0=moonlight"
+                    ),
+                }
+            ],
+        )
+        self.assertEqual(launches, [])
+
     def test_intentional_disconnect_suppresses_console_exit_event(self) -> None:
         process = FakeProcess(pid=100)
 
-        def fake_factory(command: list[str], env: dict[str, str], text: bool) -> FakeProcess:
+        def fake_factory(
+            command: list[str],
+            cwd: str | None = None,
+            env: dict[str, str] | None = None,
+            text: bool = True,
+        ) -> FakeProcess:
             return process
 
         supervisor = SessionSupervisor(config=build_config(), process_factory=fake_factory)
@@ -218,7 +346,12 @@ class SessionSupervisorTests(unittest.TestCase):
     def test_unexpected_exit_reports_console_exited_with_backend(self) -> None:
         process = FakeProcess(pid=100)
 
-        def fake_factory(command: list[str], env: dict[str, str], text: bool) -> FakeProcess:
+        def fake_factory(
+            command: list[str],
+            cwd: str | None = None,
+            env: dict[str, str] | None = None,
+            text: bool = True,
+        ) -> FakeProcess:
             return process
 
         supervisor = SessionSupervisor(config=build_config(), process_factory=fake_factory)
@@ -247,7 +380,12 @@ class SessionSupervisorTests(unittest.TestCase):
     def test_unexpected_looking_glass_exit_reports_console_exited_with_backend(self) -> None:
         process = FakeProcess(pid=101)
 
-        def fake_factory(command: list[str], env: dict[str, str], text: bool) -> FakeProcess:
+        def fake_factory(
+            command: list[str],
+            cwd: str | None = None,
+            env: dict[str, str] | None = None,
+            text: bool = True,
+        ) -> FakeProcess:
             return process
 
         supervisor = SessionSupervisor(
@@ -402,6 +540,12 @@ def build_config(
     looking_glass_fullscreen: bool = True,
     looking_glass_disable_host_screensaver: bool = True,
     looking_glass_spice_enabled: bool = True,
+    moonlight_binary: str = "moonlight",
+    moonlight_host: str = "192.168.50.20",
+    moonlight_base_port: int = 47989,
+    moonlight_app: str = "Desktop",
+    moonlight_state_dir: Path = Path("/var/lib/relayinner-display/moonlight"),
+    moonlight_quit_app_after_session: bool = False,
     power_helper: str = "wlr-randr",
 ) -> AppConfig:
     run_dir = Path("/run/relayinner-display")
@@ -426,6 +570,16 @@ def build_config(
             spice_enabled=looking_glass_spice_enabled,
         )
         if backend == "looking-glass"
+        else None,
+        moonlight=ConsoleMoonlightConfig(
+            binary=moonlight_binary,
+            host=moonlight_host,
+            base_port=moonlight_base_port,
+            app=moonlight_app,
+            state_dir=moonlight_state_dir,
+            quit_app_after_session=moonlight_quit_app_after_session,
+        )
+        if backend == "moonlight"
         else None,
     )
     return AppConfig(
