@@ -3,6 +3,7 @@ from __future__ import annotations
 from argparse import ArgumentParser
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+import random
 import re
 from shutil import which
 from typing import Any, Callable
@@ -18,7 +19,7 @@ import time
 from .config import AppConfig, ConfigError, build_fallback_config, load_config
 from .input import EvdevPowerButtonSource, LogindPowerButtonPolicyChecker, PowerButtonError
 from .ipc import decode_message, encode_message, validate_session_message
-from .models import RuntimeState, SessionState, write_runtime_state
+from .models import MoonlightPairState, RuntimeState, SessionState, write_runtime_state
 from .proxmox import (
     ProxmoxClient,
     ProxmoxCommandError,
@@ -45,6 +46,8 @@ CONSOLE_LAUNCHERS = {
 IMPLEMENTED_CONSOLE_BACKENDS = {"spice", "vnc", "looking-glass", "moonlight"}
 REQUIRED_DAEMON_BINARIES: tuple[str, ...] = ()
 MIN_MOONLIGHT_VERSION = (6, 0, 0)
+MOONLIGHT_PAIR_TIMEOUT = timedelta(seconds=300)
+MOONLIGHT_HOST_PROBE_TIMEOUT_S = 1.0
 VERSION_RE = re.compile(r"(\d+)\.(\d+)\.(\d+)")
 
 
@@ -53,6 +56,8 @@ class RuntimeValidationError(RuntimeError):
 
 
 CommandRunner = Callable[..., subprocess.CompletedProcess[str]]
+TCPConnectProbe = Callable[[str, int, float], None]
+PinGenerator = Callable[[], str]
 
 
 def utcnow() -> datetime:
@@ -61,6 +66,10 @@ def utcnow() -> datetime:
 
 def subsystem_logger(namespace: str, subsystem: str) -> logging.Logger:
     return logging.getLogger(f"{namespace}.{subsystem}")
+
+
+def generate_moonlight_pin() -> str:
+    return f"{random.SystemRandom().randrange(10000):04d}"
 
 
 class SessionSocketServer:
@@ -168,6 +177,8 @@ class DisplayDaemon:
         host_policy_checker: Any | None = None,
         dependency_finder: Callable[[str], str | None] | None = None,
         command_runner: CommandRunner = subprocess.run,
+        tcp_connect_probe: TCPConnectProbe | None = None,
+        pin_generator: PinGenerator | None = None,
         startup_error: str | None = None,
     ) -> None:
         self.config = config
@@ -189,6 +200,14 @@ class DisplayDaemon:
                 if config.console.looking_glass is not None
                 else None
             ),
+            moonlight_host=(
+                config.console.moonlight.host if config.console.moonlight is not None else None
+            ),
+            moonlight_base_port=(
+                config.console.moonlight.base_port
+                if config.console.moonlight is not None
+                else None
+            ),
         )
         self.session_ready = False
         self.console_running = False
@@ -202,6 +221,8 @@ class DisplayDaemon:
         self.host_policy_checker = host_policy_checker
         self.dependency_finder = dependency_finder or which
         self.command_runner = command_runner
+        self.tcp_connect_probe = tcp_connect_probe or self._probe_tcp_connectivity
+        self.pin_generator = pin_generator or generate_moonlight_pin
         self.validate_runtime_dependencies = dependency_finder is not None or isinstance(
             proxmox,
             ProxmoxClient,
@@ -210,6 +231,7 @@ class DisplayDaemon:
         self.last_power_button_accepted_at: datetime | None = None
         self.power_button_action_started_at: datetime | None = None
         self.proxmox_failure_timestamps: list[datetime] = []
+        self.moonlight_pair_requested_at: datetime | None = None
 
     def prepare_runtime(self) -> None:
         self.config.runtime.run_dir.mkdir(parents=True, exist_ok=True)
@@ -294,6 +316,11 @@ class DisplayDaemon:
                 self._transition(self._waiting_session_state())
                 self._persist_state()
                 return responses + failure_actions + [{"type": "show_waiting", "reason": "vm_stopped"}]
+            if self._vm_can_show_console(self.state.vm_power_state) and self._moonlight_pairing_pending():
+                self._transition(SessionState.WAITING_FOR_PAIRING)
+                self._persist_state()
+                responses.append(self._moonlight_pair_waiting_message())
+                return responses
             if self._vm_can_show_console(self.state.vm_power_state):
                 waiting_reason = "reconnecting" if self.next_reconnect_at is not None else "connecting"
                 self._transition(
@@ -387,6 +414,7 @@ class DisplayDaemon:
         if self._vm_is_off(vm_status):
             self.next_reconnect_at = None
             self.current_reconnect_delay_ms = self.config.policy.reconnect_initial_ms
+            self._clear_moonlight_pair_state()
             actions_for_session: list[dict[str, object]] = []
             if self.console_running:
                 self.console_running = False
@@ -403,6 +431,7 @@ class DisplayDaemon:
             return actions + actions_for_session + display_actions
 
         if not self._vm_can_show_console(vm_status):
+            self._clear_moonlight_pair_state()
             if not self.console_running and self.state.display_power_intent == "on":
                 self._transition(self._waiting_session_state())
             self._persist_state()
@@ -420,6 +449,18 @@ class DisplayDaemon:
             return actions + display_actions
 
         backend = self.config.target.console_backend
+        if backend == "moonlight":
+            try:
+                pairing_blocked, pairing_actions = self._handle_moonlight_pairing(timestamp)
+            except RuntimeValidationError as exc:
+                return actions + display_actions + self._enter_degraded(
+                    f"Console preparation failed for backend={backend}: {exc}",
+                    subsystem="console",
+                )
+            if pairing_blocked:
+                self._persist_state()
+                return actions + display_actions + pairing_actions
+
         try:
             self._transition(SessionState.REQUESTING_CONSOLE)
             connect_message = self._prepare_console_launch()
@@ -632,6 +673,7 @@ class DisplayDaemon:
 
     def _set_startup_error(self, reason: str) -> None:
         self.startup_error = reason
+        self._clear_moonlight_pair_state()
         self.state.last_error = reason
         self.state.degraded_reason = reason
         self.state.power_button_action_in_flight = False
@@ -659,6 +701,7 @@ class DisplayDaemon:
         had_console = self.console_running or self.console_pid is not None
         self.console_running = False
         self.console_pid = None
+        self._clear_moonlight_pair_state()
         self.state.active_console_backend = None
         self.state.last_error = reason
         self.state.degraded_reason = reason
@@ -702,6 +745,164 @@ class DisplayDaemon:
         moonlight.portable_marker_path.touch(exist_ok=True)
         os.chmod(moonlight.portable_marker_path, 0o600)
         chown_if_present(moonlight.portable_marker_path, SESSION_USER, SESSION_GROUP, self.logger)
+
+    def _handle_moonlight_pairing(
+        self,
+        now: datetime,
+    ) -> tuple[bool, list[dict[str, object]]]:
+        moonlight = self.config.console.moonlight
+        if moonlight is None:
+            raise AssertionError("Moonlight backend selected without console.moonlight config")
+
+        if not self._moonlight_host_is_reachable(moonlight.host, moonlight.base_port):
+            self._clear_moonlight_pair_state()
+            self.state.last_error = (
+                "Moonlight host is not reachable yet: "
+                f"{moonlight.host_authority} (tcp/{moonlight.base_port})"
+            )
+            self._schedule_reconnect(now)
+            self._transition(SessionState.RECONNECTING_CONSOLE)
+            self.console_logger.warning("%s", self.state.last_error)
+            return True, [{"type": "show_waiting", "reason": "reconnecting"}]
+
+        self.next_reconnect_at = None
+        if self._moonlight_list_succeeds():
+            self._set_moonlight_pair_state(MoonlightPairState.PAIRED)
+            self.state.moonlight_pair_pin = None
+            self.moonlight_pair_requested_at = None
+            self.state.last_error = None
+            return False, []
+
+        should_issue_pair = (
+            self.state.moonlight_pair_state is not MoonlightPairState.PENDING_PIN_APPROVAL
+            or self.state.moonlight_pair_pin is None
+            or self.moonlight_pair_requested_at is None
+            or now - self.moonlight_pair_requested_at >= MOONLIGHT_PAIR_TIMEOUT
+        )
+
+        if should_issue_pair:
+            pin = self.pin_generator()
+            self._issue_moonlight_pair(pin)
+            self.state.moonlight_pair_pin = pin
+            self.moonlight_pair_requested_at = now
+
+        self._set_moonlight_pair_state(MoonlightPairState.PENDING_PIN_APPROVAL)
+        self.state.last_error = None
+        message = self._moonlight_pair_waiting_message()
+        previous_state = self.state.session_state
+        self._transition(SessionState.WAITING_FOR_PAIRING)
+        if previous_state is SessionState.WAITING_FOR_PAIRING and not should_issue_pair:
+            return True, []
+        return True, [message]
+
+    def _moonlight_pairing_pending(self) -> bool:
+        return (
+            self.config.target.console_backend == "moonlight"
+            and self.state.moonlight_pair_state is MoonlightPairState.PENDING_PIN_APPROVAL
+            and self.state.moonlight_pair_pin is not None
+        )
+
+    def _moonlight_pair_waiting_message(self) -> dict[str, object]:
+        moonlight = self.config.console.moonlight
+        if moonlight is None or self.state.moonlight_pair_pin is None:
+            raise AssertionError("Moonlight pairing wait requested without active Moonlight PIN")
+
+        return {
+            "type": "show_waiting",
+            "reason": "pairing_required",
+            "details": {
+                "backend": "moonlight",
+                "host": moonlight.host_authority,
+                "pin": self.state.moonlight_pair_pin,
+                "instructions": "Open the Sunshine web UI PIN page on the guest and enter this PIN.",
+            },
+        }
+
+    def _set_moonlight_pair_state(self, state: MoonlightPairState) -> None:
+        if self.state.moonlight_pair_state != state:
+            self.console_logger.info(
+                "Moonlight pair state transition: %s -> %s",
+                self.state.moonlight_pair_state.value,
+                state.value,
+            )
+        self.state.moonlight_pair_state = state
+
+    def _clear_moonlight_pair_state(self) -> None:
+        self.state.moonlight_pair_pin = None
+        self.moonlight_pair_requested_at = None
+        self._set_moonlight_pair_state(MoonlightPairState.UNKNOWN)
+
+    def _moonlight_host_is_reachable(self, host: str, port: int) -> bool:
+        try:
+            self.tcp_connect_probe(host, port, MOONLIGHT_HOST_PROBE_TIMEOUT_S)
+        except OSError:
+            return False
+        return True
+
+    def _moonlight_list_succeeds(self) -> bool:
+        moonlight = self.config.console.moonlight
+        if moonlight is None:
+            raise AssertionError("Moonlight backend selected without console.moonlight config")
+
+        completed = self._run_moonlight_command(["list", moonlight.host_authority])
+        return completed.returncode == 0
+
+    def _issue_moonlight_pair(self, pin: str) -> None:
+        moonlight = self.config.console.moonlight
+        if moonlight is None:
+            raise AssertionError("Moonlight backend selected without console.moonlight config")
+
+        completed = self._run_moonlight_command(["pair", moonlight.host_authority, "--pin", pin])
+        self.console_logger.info(
+            "Issued Moonlight pairing request for host=%s result=%s",
+            moonlight.host_authority,
+            completed.returncode,
+        )
+
+    def _run_moonlight_command(self, subcommand: list[str]) -> subprocess.CompletedProcess[str]:
+        moonlight = self.config.console.moonlight
+        if moonlight is None:
+            raise AssertionError("Moonlight backend selected without console.moonlight config")
+
+        command = [self._resolved_binary(moonlight.binary), *subcommand]
+        if subcommand[:1] == ["list"]:
+            command.append("--csv")
+        try:
+            return self.command_runner(
+                command,
+                cwd=str(moonlight.state_dir),
+                text=True,
+                capture_output=True,
+                check=False,
+                **self._session_user_command_kwargs(),
+            )
+        except OSError as exc:
+            raise RuntimeValidationError(
+                f"Failed to run Moonlight command {' '.join(subcommand)}: {exc}"
+            ) from exc
+
+    def _session_user_command_kwargs(self) -> dict[str, object]:
+        if os.geteuid() != 0:
+            return {}
+
+        try:
+            session_entry = pwd.getpwnam(SESSION_USER)
+        except KeyError as exc:
+            raise RuntimeValidationError(f"Session user does not exist: {SESSION_USER}") from exc
+
+        extra_groups = sorted(
+            self._session_user_group_ids(session_entry.pw_name, session_entry.pw_gid)
+            - {session_entry.pw_gid}
+        )
+        return {
+            "user": session_entry.pw_uid,
+            "group": session_entry.pw_gid,
+            "extra_groups": extra_groups,
+        }
+
+    def _probe_tcp_connectivity(self, host: str, port: int, timeout_s: float) -> None:
+        connection = socket.create_connection((host, port), timeout=timeout_s)
+        connection.close()
 
     def _spice_vv_path(self) -> Path:
         if self.config.console.spice is not None:

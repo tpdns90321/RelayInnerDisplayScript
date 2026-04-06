@@ -43,6 +43,20 @@ class IPCTests(unittest.TestCase):
         self.assertEqual(validate_daemon_message(daemon_payload), daemon_payload)
         self.assertEqual(validate_session_message(session_payload), session_payload)
 
+    def test_show_waiting_accepts_pairing_details(self) -> None:
+        payload = {
+            "type": "show_waiting",
+            "reason": "pairing_required",
+            "details": {
+                "backend": "moonlight",
+                "host": "192.168.50.20",
+                "pin": "1234",
+                "instructions": "Open Sunshine and enter this PIN.",
+            },
+        }
+
+        self.assertEqual(validate_daemon_message(payload), payload)
+
     def test_console_lifecycle_messages_allow_legacy_missing_backend(self) -> None:
         payload = {"type": "console_exited", "code": 1, "signal": 0}
 
@@ -84,6 +98,16 @@ class IPCTests(unittest.TestCase):
                         "--display-mode",
                         "fullscreen",
                     ],
+                }
+            )
+
+    def test_invalid_waiting_details_are_rejected(self) -> None:
+        with self.assertRaises(IPCError):
+            validate_daemon_message(
+                {
+                    "type": "show_waiting",
+                    "reason": "pairing_required",
+                    "details": {"pin": ""},
                 }
             )
 

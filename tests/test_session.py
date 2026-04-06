@@ -343,6 +343,34 @@ class SessionSupervisorTests(unittest.TestCase):
         self.assertEqual(supervisor.view_state.status_text, "Waiting for VM")
         self.assertIsNone(supervisor.poll_console())
 
+    def test_show_waiting_pairing_details_update_view_state(self) -> None:
+        supervisor = SessionSupervisor(config=build_config(backend="moonlight"))
+
+        events = supervisor.handle_daemon_message(
+            {
+                "type": "show_waiting",
+                "reason": "pairing_required",
+                "details": {
+                    "backend": "moonlight",
+                    "host": "192.168.50.20",
+                    "pin": "1234",
+                    "instructions": "Open the Sunshine web UI PIN page on the guest and enter this PIN.",
+                },
+            }
+        )
+
+        self.assertEqual(events, [])
+        self.assertEqual(supervisor.view_state.status_text, "Pairing required")
+        self.assertEqual(
+            supervisor.view_state.details,
+            {
+                "backend": "moonlight",
+                "host": "192.168.50.20",
+                "pin": "1234",
+                "instructions": "Open the Sunshine web UI PIN page on the guest and enter this PIN.",
+            },
+        )
+
     def test_unexpected_exit_reports_console_exited_with_backend(self) -> None:
         process = FakeProcess(pid=100)
 

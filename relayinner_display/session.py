@@ -24,6 +24,7 @@ PowerCommandRunner = Callable[..., subprocess.CompletedProcess[str]]
 WAITING_STATUS_TEXT = {
     "connecting": "Connecting",
     "vm_stopped": "Waiting for VM",
+    "pairing_required": "Pairing required",
     "reconnecting": "Connection lost",
     "degraded": "Degraded",
 }
@@ -87,6 +88,7 @@ def parse_wlr_randr_outputs(output: str) -> list[str]:
 class SessionViewState:
     waiting_reason: str = "vm_stopped"
     status_text: str = DEFAULT_WAITING_STATUS
+    details: dict[str, str] | None = None
     console_active: bool = False
     cursor_hidden: bool = False
     display_power_state: str = "on"
@@ -190,6 +192,11 @@ class SessionSupervisor:
 
         if message_type == "show_waiting":
             self.view_state.waiting_reason = str(payload["reason"])
+            self.view_state.details = (
+                {str(key): str(value) for key, value in dict(payload["details"]).items()}
+                if "details" in payload
+                else None
+            )
             self._stop_console(report_exit=False)
             self._refresh_view_state()
             self.session_logger.info("Waiting state set to %s", self.view_state.waiting_reason)
@@ -197,6 +204,7 @@ class SessionSupervisor:
 
         if message_type == "disconnect_console":
             self.view_state.waiting_reason = str(payload["reason"])
+            self.view_state.details = None
             self._stop_console(report_exit=False)
             self._refresh_view_state()
             self.session_logger.info(
@@ -283,6 +291,7 @@ class SessionSupervisor:
 
         self._stop_console(report_exit=False)
         self.view_state.waiting_reason = "connecting"
+        self.view_state.details = None
         try:
             process = self.process_factory(
                 argv,

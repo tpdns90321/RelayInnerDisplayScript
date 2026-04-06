@@ -99,10 +99,10 @@ For the required host and guest preparation, follow the upstream documentation:
 
 ## Moonlight Backend
 
-Use `console_backend = "moonlight"` only after the guest already runs Sunshine and the Proxmox host already has Linux `moonlight-qt` version `6.0.0` or newer. This Spec 30 slice intentionally covers only the backend contract, managed workspace, and direct `moonlight stream` launch:
+Use `console_backend = "moonlight"` only after the guest already runs Sunshine and the Proxmox host already has Linux `moonlight-qt` version `6.0.0` or newer. The current Specs 30 and 31 slice covers the backend contract, persistent workspace, PIN-assist pairing, and direct `moonlight stream` launch:
 
 - the installer does not configure Sunshine inside the guest
-- the installer does not automate Moonlight pairing
+- the relay does not store Sunshine usernames or passwords
 - this path targets Linux `moonlight-qt`, not mobile clients or browser flows
 
 Configure the relay like this:
@@ -120,9 +120,11 @@ state_dir = "/var/lib/relayinner-display/moonlight"
 quit_app_after_session = false
 ```
 
-At runtime the daemon verifies that the configured Moonlight binary exists and reports version `6.0.0` or newer, prepares `state_dir` plus `portable.dat`, and launches `moonlight stream <host-authority> <app> --display-mode fullscreen` from that managed workspace. If `base_port` differs from `47989`, the relay renders `host:port` for hostnames and IPv4 or `[ipv6]:port` for IPv6 literals before invoking Moonlight.
+At runtime the daemon verifies that the configured Moonlight binary exists and reports version `6.0.0` or newer, prepares `state_dir` plus `portable.dat`, probes TCP reachability to the configured Sunshine host, and uses `moonlight list <host-authority> --csv` from that managed workspace to decide whether the host is already paired. If `base_port` differs from `47989`, the relay renders `host:port` for hostnames and IPv4 or `[ipv6]:port` for IPv6 literals before invoking Moonlight.
 
-Sunshine setup and any required pairing state in the managed Moonlight workspace remain operator-managed in this slice. Specs 31 and 32 are reserved for pair-assist and richer Moonlight launch/recovery behavior.
+If the host is reachable but not paired, the daemon generates a 4-digit PIN, issues `moonlight pair <host-authority> --pin <pin>`, and moves the kiosk into `waiting_for_pairing`. Approve that PIN in the Sunshine web UI `PIN` page on the guest-side host; once `moonlight list` succeeds, the relay clears the PIN and continues to `moonlight stream` automatically. The paired-host state remains in `state_dir` across daemon and host restarts.
+
+Sunshine setup inside the guest still remains operator-managed, and Spec 32 still owns richer Moonlight recovery and launch-ops behavior beyond this PIN-assist flow.
 
 ## Uninstall
 
@@ -226,10 +228,14 @@ The runtime state file now records the public appliance state and key fault mark
 - `degraded_reason`
 - `last_console_exit`
 
-When VNC or Looking Glass is selected, the same state file also includes backend-specific troubleshooting metadata:
+When VNC, Looking Glass, or Moonlight is selected, the same state file also includes backend-specific troubleshooting metadata:
 
 - `vnc_endpoint`
 - `looking_glass_shm_file`
+- `moonlight_host`
+- `moonlight_base_port`
+- `moonlight_pair_state`
+- `moonlight_pair_pin` while pairing approval is pending
 
 If power-button forwarding is enabled, confirm the logind override is active:
 
@@ -245,6 +251,7 @@ When the appliance is not showing the guest, inspect the state file first:
 
 - `appliance_state=display_sleeping` means the VM has remained off past `dpms_off_delay_ms`.
 - `appliance_state=waiting_for_vm` means the session is healthy but the VM is not in a runnable state.
+- `appliance_state=waiting_for_pairing` means the Moonlight host is reachable but still waiting for Sunshine PIN approval.
 - `appliance_state=degraded` means a local runtime dependency, power-button validation, or repeated Proxmox command failure tripped the Spec 15 failure policy.
 
 Then inspect journald by subsystem:
@@ -277,4 +284,6 @@ If the state file or journal shows `console_backend=looking-glass` and the appli
 
 If Looking Glass reconnects repeatedly while the guest stays up, inspect the console log lines for `backend=looking-glass` and confirm the guest-side host application plus upstream passthrough setup are healthy. The relay only validates host-visible prerequisites; it does not diagnose guest-side capture or passthrough failures beyond that boundary.
 
-If the state file or journal shows `console_backend=moonlight` and the appliance moves into `degraded`, verify that Linux `moonlight-qt` `6.0.0` or newer is installed, that `[console.moonlight].host` and `base_port` point at the expected Sunshine host, and that the configured `state_dir` plus `portable.dat` are present and writable by the `relayinner-display` session user. The current implementation prepares the workspace and launches Moonlight from it, but any required pairing state inside that workspace is still operator-managed.
+If the state file shows `appliance_state=waiting_for_pairing`, open the Sunshine web UI on the guest-side host, go to the `PIN` page, and enter the current `moonlight_pair_pin` shown on the kiosk or in `/run/relayinner-display/daemon.state.json`. The relay rotates that PIN after 300 seconds if approval has not completed yet.
+
+If the state file or journal shows `console_backend=moonlight` and the appliance moves into `degraded`, verify that Linux `moonlight-qt` `6.0.0` or newer is installed, that `[console.moonlight].host` and `base_port` point at the expected Sunshine host, and that the configured `state_dir` plus `portable.dat` are present and writable by the `relayinner-display` session user. The relay now manages the Moonlight workspace plus short-lived PIN assist there, but it still does not store Sunshine credentials and Spec 32 still owns richer recovery behavior.

@@ -37,6 +37,14 @@ def _is_power_state(value: object) -> bool:
     return value in {"on", "off"}
 
 
+def _is_string_dict(value: object) -> bool:
+    return (
+        isinstance(value, dict)
+        and bool(value)
+        and all(_is_non_empty_string(key) and _is_non_empty_string(item) for key, item in value.items())
+    )
+
+
 DAEMON_TO_SESSION_FIELDS: dict[str, dict[str, Validator]] = {
     "show_waiting": {"reason": _is_non_empty_string},
     "connect_console": {
@@ -64,6 +72,7 @@ SESSION_TO_DAEMON_OPTIONAL_FIELDS: dict[str, dict[str, Validator]] = {
 }
 
 DAEMON_TO_SESSION_OPTIONAL_FIELDS: dict[str, dict[str, Validator]] = {
+    "show_waiting": {"details": _is_string_dict},
     "connect_console": {"cwd": _is_absolute_path_string},
 }
 

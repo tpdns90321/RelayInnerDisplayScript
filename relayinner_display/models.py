@@ -14,6 +14,7 @@ class SessionState(str, Enum):
     BOOTING = "booting"
     WAITING_FOR_SESSION = "waiting_for_session"
     WAITING_FOR_VM = "waiting_for_vm"
+    WAITING_FOR_PAIRING = "waiting_for_pairing"
     REQUESTING_CONSOLE = "requesting_console"
     SHOWING_CONSOLE = "showing_console"
     RECONNECTING_CONSOLE = "reconnecting_console"
@@ -24,6 +25,12 @@ class SessionState(str, Enum):
         return self.value
 
 
+class MoonlightPairState(str, Enum):
+    UNKNOWN = "unknown"
+    PENDING_PIN_APPROVAL = "pending_pin_approval"
+    PAIRED = "paired"
+
+
 @dataclass
 class RuntimeState:
     vmid: int
@@ -32,6 +39,10 @@ class RuntimeState:
     active_console_backend: str | None = None
     vnc_endpoint: str | None = None
     looking_glass_shm_file: str | None = None
+    moonlight_host: str | None = None
+    moonlight_base_port: int | None = None
+    moonlight_pair_state: MoonlightPairState = MoonlightPairState.UNKNOWN
+    moonlight_pair_pin: str | None = None
     vm_power_state: str = "unknown"
     session_ready: bool = False
     display_power_intent: str = "on"
@@ -83,6 +94,10 @@ class RuntimeState:
             "active_console_backend": self.active_console_backend,
             "vnc_endpoint": self.vnc_endpoint,
             "looking_glass_shm_file": self.looking_glass_shm_file,
+            "moonlight_host": self.moonlight_host,
+            "moonlight_base_port": self.moonlight_base_port,
+            "moonlight_pair_state": self.moonlight_pair_state.value,
+            "moonlight_pair_pin": self.moonlight_pair_pin,
             "appliance_state": self.session_state.public_value(),
             "session_state": self.session_state.value,
             "vm_power_state": self.vm_power_state,
