@@ -10,6 +10,7 @@ import logging
 import os
 import pwd
 import socket
+import stat
 import time
 
 from .config import AppConfig, ConfigError, build_fallback_config, load_config
@@ -38,8 +39,12 @@ CONSOLE_LAUNCHERS = {
     "vnc": "remote-viewer",
     "looking-glass": "looking-glass-client",
 }
-IMPLEMENTED_CONSOLE_BACKENDS = {"spice", "vnc"}
+IMPLEMENTED_CONSOLE_BACKENDS = {"spice", "vnc", "looking-glass"}
 REQUIRED_DAEMON_BINARIES: tuple[str, ...] = ()
+
+
+class RuntimeValidationError(RuntimeError):
+    """Raised when runtime prerequisites are missing or inaccessible."""
 
 
 def utcnow() -> datetime:
@@ -170,6 +175,11 @@ class DisplayDaemon:
             node_name="",
             console_backend=config.target.console_backend,
             vnc_endpoint=config.console.vnc.endpoint if config.console.vnc is not None else None,
+            looking_glass_shm_file=(
+                str(config.console.looking_glass.shm_file)
+                if config.console.looking_glass is not None
+                else None
+            ),
         )
         self.session_ready = False
         self.console_running = False
@@ -215,8 +225,9 @@ class DisplayDaemon:
         try:
             if self.validate_runtime_dependencies:
                 self._validate_runtime_dependencies()
+            self._validate_console_startup_prerequisites()
             self._prepare_power_button_capture()
-        except PowerButtonError as exc:
+        except (PowerButtonError, RuntimeValidationError) as exc:
             self._set_startup_error(str(exc))
             self._persist_state()
             self.session_logger.error("Daemon started in degraded mode: %s", exc)
@@ -398,12 +409,6 @@ class DisplayDaemon:
             return actions + display_actions
 
         backend = self.config.target.console_backend
-        if backend not in IMPLEMENTED_CONSOLE_BACKENDS:
-            return actions + display_actions + self._enter_degraded(
-                f"Console preparation failed for backend={backend}: not implemented",
-                subsystem="console",
-            )
-
         try:
             self._transition(SessionState.REQUESTING_CONSOLE)
             connect_message = self._prepare_console_launch()
@@ -414,7 +419,7 @@ class DisplayDaemon:
             self._persist_state()
             self.console_logger.warning("%s", exc)
             return actions + display_actions + [{"type": "show_waiting", "reason": "reconnecting"}]
-        except VncConfigurationError as exc:
+        except (RuntimeValidationError, VncConfigurationError) as exc:
             return actions + display_actions + self._enter_degraded(
                 f"Console preparation failed for backend={backend}: {exc}",
                 subsystem="console",
@@ -726,19 +731,149 @@ class DisplayDaemon:
                 "argv": [vnc.viewer, "--full-screen", vnc.uri],
             }
 
+        if backend == "looking-glass":
+            looking_glass = self.config.console.looking_glass
+            if looking_glass is None:
+                raise AssertionError(
+                    "Looking Glass backend selected without console.looking_glass config"
+                )
+
+            self._validate_looking_glass_preflight(
+                check_binary=self.validate_runtime_dependencies,
+                check_session_access=self.validate_runtime_dependencies,
+            )
+            self.state.looking_glass_shm_file = str(looking_glass.shm_file)
+            self.console_logger.info(
+                "Validated Looking Glass shared memory for VM %s at %s with renderer=%s",
+                self.state.vmid,
+                self.state.looking_glass_shm_file,
+                looking_glass.renderer,
+            )
+            return {
+                "type": "connect_console",
+                "backend": backend,
+                "launcher": looking_glass.binary,
+                "argv": looking_glass.argv,
+            }
+
         raise AssertionError(f"Unhandled console backend: {backend}")
 
     def _validate_runtime_dependencies(self) -> None:
         required = [*REQUIRED_DAEMON_BINARIES, self.config.display.power_helper]
         if self.config.target.console_backend in IMPLEMENTED_CONSOLE_BACKENDS:
-            required.append(CONSOLE_LAUNCHERS[self.config.target.console_backend])
+            required.append(self._configured_console_launcher())
         seen: set[str] = set()
         for binary in required:
-            if binary in seen:
+            key = str(binary)
+            if key in seen:
                 continue
-            seen.add(binary)
-            if self.dependency_finder(binary) is None:
-                raise PowerButtonError(f"Missing required binary: {binary}")
+            seen.add(key)
+            self._ensure_binary_available(binary)
+
+    def _validate_console_startup_prerequisites(self) -> None:
+        if self.config.target.console_backend != "looking-glass":
+            return
+
+        self._validate_looking_glass_preflight(
+            check_binary=self.validate_runtime_dependencies,
+            check_session_access=self.validate_runtime_dependencies,
+        )
+        looking_glass = self.config.console.looking_glass
+        if looking_glass is None:
+            raise AssertionError("Looking Glass backend selected without console.looking_glass config")
+        self.console_logger.info(
+            "Looking Glass startup preflight satisfied: shm_file=%s renderer=%s",
+            looking_glass.shm_file,
+            looking_glass.renderer,
+        )
+
+    def _configured_console_launcher(self) -> str:
+        backend = self.config.target.console_backend
+        if backend == "looking-glass":
+            looking_glass = self.config.console.looking_glass
+            if looking_glass is None:
+                raise AssertionError(
+                    "Looking Glass backend selected without console.looking_glass config"
+                )
+            return looking_glass.binary
+        return CONSOLE_LAUNCHERS[backend]
+
+    def _ensure_binary_available(self, binary: str) -> None:
+        binary_path = Path(binary)
+        if binary_path.is_absolute():
+            if not binary_path.exists():
+                raise RuntimeValidationError(f"Missing required binary: {binary}")
+            if not os.access(binary_path, os.X_OK):
+                raise RuntimeValidationError(f"Configured binary is not executable: {binary}")
+            return
+
+        if self.dependency_finder(binary) is None:
+            raise RuntimeValidationError(f"Missing required binary: {binary}")
+
+    def _validate_looking_glass_preflight(
+        self,
+        *,
+        check_binary: bool,
+        check_session_access: bool,
+    ) -> None:
+        looking_glass = self.config.console.looking_glass
+        if looking_glass is None:
+            raise AssertionError("Looking Glass backend selected without console.looking_glass config")
+
+        if check_binary:
+            self._ensure_binary_available(looking_glass.binary)
+
+        shm_file = looking_glass.shm_file
+        if not shm_file.exists():
+            raise RuntimeValidationError(
+                f"Looking Glass shared memory path does not exist: {shm_file}"
+            )
+        if shm_file.is_dir():
+            raise RuntimeValidationError(
+                f"Looking Glass shared memory path is not a file or device: {shm_file}"
+            )
+        if not check_session_access:
+            return
+
+        if not self._session_user_can_read_path(shm_file):
+            raise RuntimeValidationError(
+                "Looking Glass shared memory path is not readable by session user "
+                f"{SESSION_USER}: {shm_file}"
+            )
+
+        flags = os.O_RDONLY
+        non_blocking = getattr(os, "O_NONBLOCK", 0)
+        try:
+            descriptor = os.open(shm_file, flags | non_blocking)
+        except OSError as exc:
+            raise RuntimeValidationError(
+                f"Looking Glass shared memory path could not be opened: {shm_file}: {exc}"
+            ) from exc
+        os.close(descriptor)
+
+    def _session_user_can_read_path(self, path: Path) -> bool:
+        try:
+            session_entry = pwd.getpwnam(SESSION_USER)
+        except KeyError as exc:
+            raise RuntimeValidationError(f"Session user does not exist: {SESSION_USER}") from exc
+
+        stat_result = path.stat()
+        mode = stat_result.st_mode
+        if stat_result.st_uid == session_entry.pw_uid:
+            return bool(mode & stat.S_IRUSR)
+
+        group_ids = self._session_user_group_ids(session_entry.pw_name, session_entry.pw_gid)
+        if stat_result.st_gid in group_ids:
+            return bool(mode & stat.S_IRGRP)
+
+        return bool(mode & stat.S_IROTH)
+
+    def _session_user_group_ids(self, username: str, primary_gid: int) -> set[int]:
+        group_ids = {primary_gid}
+        for group in grp.getgrall():
+            if username in group.gr_mem:
+                group_ids.add(group.gr_gid)
+        return group_ids
 
     def _refresh_vm_status(self, now: datetime) -> tuple[str | None, list[dict[str, object]]]:
         try:

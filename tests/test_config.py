@@ -168,7 +168,16 @@ class ConfigTests(unittest.TestCase):
         content = VALID_CONFIG.replace('console_backend = "spice"', 'console_backend = "looking-glass"')
         content = content.replace(
             "[console.spice]\nvv_path = \"/run/relayinner-display/console/spice-current.vv\"\n",
-            "[console.looking_glass]\n",
+            textwrap.dedent(
+                """\
+                [console.looking_glass]
+                shm_file = "/dev/kvmfr0"
+                renderer = "egl"
+                fullscreen = false
+                disable_host_screensaver = false
+                spice_enabled = false
+                """
+            ),
         )
         with TemporaryDirectory() as temp_dir:
             config_path = Path(temp_dir) / "config.toml"
@@ -178,6 +187,30 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.target.console_backend, "looking-glass")
         self.assertIsNotNone(config.console.looking_glass)
         self.assertIsNone(config.console.spice)
+        self.assertEqual(config.console.looking_glass.binary, "looking-glass-client")
+        self.assertEqual(config.console.looking_glass.shm_file, Path("/dev/kvmfr0"))
+        self.assertEqual(config.console.looking_glass.renderer, "egl")
+        self.assertFalse(config.console.looking_glass.fullscreen)
+        self.assertFalse(config.console.looking_glass.disable_host_screensaver)
+        self.assertFalse(config.console.looking_glass.spice_enabled)
+
+    def test_looking_glass_defaults_are_applied(self) -> None:
+        content = VALID_CONFIG.replace('console_backend = "spice"', 'console_backend = "looking-glass"')
+        content = content.replace(
+            "[console.spice]\nvv_path = \"/run/relayinner-display/console/spice-current.vv\"\n",
+            "[console.looking_glass]\nshm_file = \"/dev/kvmfr0\"\n",
+        )
+
+        with TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "config.toml"
+            config_path.write_text(content, encoding="utf-8")
+            config = load_config(config_path)
+
+        self.assertEqual(config.console.looking_glass.binary, "looking-glass-client")
+        self.assertEqual(config.console.looking_glass.renderer, "auto")
+        self.assertTrue(config.console.looking_glass.fullscreen)
+        self.assertTrue(config.console.looking_glass.disable_host_screensaver)
+        self.assertTrue(config.console.looking_glass.spice_enabled)
 
     def test_legacy_runtime_spice_vv_path_is_accepted_for_spice_only(self) -> None:
         content = """
@@ -287,6 +320,45 @@ class ConfigTests(unittest.TestCase):
         content = content.replace(
             "[console.spice]\nvv_path = \"/run/relayinner-display/console/spice-current.vv\"\n",
             "[console.vnc]\ndisplay_number = 77\nviewer = \"vinagre\"\n",
+        )
+        with TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "config.toml"
+            config_path.write_text(content, encoding="utf-8")
+
+            with self.assertRaises(ConfigError):
+                load_config(config_path)
+
+    def test_looking_glass_renderer_must_be_supported(self) -> None:
+        content = VALID_CONFIG.replace('console_backend = "spice"', 'console_backend = "looking-glass"')
+        content = content.replace(
+            "[console.spice]\nvv_path = \"/run/relayinner-display/console/spice-current.vv\"\n",
+            "[console.looking_glass]\nshm_file = \"/dev/kvmfr0\"\nrenderer = \"vulkan\"\n",
+        )
+        with TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "config.toml"
+            config_path.write_text(content, encoding="utf-8")
+
+            with self.assertRaises(ConfigError):
+                load_config(config_path)
+
+    def test_looking_glass_shm_file_must_be_absolute(self) -> None:
+        content = VALID_CONFIG.replace('console_backend = "spice"', 'console_backend = "looking-glass"')
+        content = content.replace(
+            "[console.spice]\nvv_path = \"/run/relayinner-display/console/spice-current.vv\"\n",
+            "[console.looking_glass]\nshm_file = \"dev/kvmfr0\"\n",
+        )
+        with TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "config.toml"
+            config_path.write_text(content, encoding="utf-8")
+
+            with self.assertRaises(ConfigError):
+                load_config(config_path)
+
+    def test_looking_glass_binary_must_be_non_empty(self) -> None:
+        content = VALID_CONFIG.replace('console_backend = "spice"', 'console_backend = "looking-glass"')
+        content = content.replace(
+            "[console.spice]\nvv_path = \"/run/relayinner-display/console/spice-current.vv\"\n",
+            "[console.looking_glass]\nshm_file = \"/dev/kvmfr0\"\nbinary = \"\"\n",
         )
         with TemporaryDirectory() as temp_dir:
             config_path = Path(temp_dir) / "config.toml"

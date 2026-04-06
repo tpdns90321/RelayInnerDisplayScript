@@ -9,6 +9,7 @@ import tomllib
 SUPPORTED_CONSOLE_BACKENDS = {"spice", "vnc", "looking-glass"}
 SUPPORTED_VNC_BIND_HOSTS = {"127.0.0.1", "localhost"}
 SUPPORTED_VNC_VIEWERS = {"remote-viewer"}
+SUPPORTED_LOOKING_GLASS_RENDERERS = {"auto", "egl", "opengl"}
 SUPPORTED_DPMS_POLICIES = {"vm-power"}
 SUPPORTED_POWER_BUTTON_ACTIONS_WHEN_RUNNING = {"shutdown"}
 SUPPORTED_POWER_BUTTON_ACTIONS_WHEN_STOPPED = {"start"}
@@ -20,6 +21,8 @@ DEFAULT_SPICE_VV_PATH = DEFAULT_CONSOLE_ARTIFACT_DIR / "spice-current.vv"
 DEFAULT_LOG_NAMESPACE = "relayinner-display"
 DEFAULT_VNC_BIND_HOST = "127.0.0.1"
 DEFAULT_VNC_VIEWER = "remote-viewer"
+DEFAULT_LOOKING_GLASS_BINARY = "looking-glass-client"
+DEFAULT_LOOKING_GLASS_RENDERER = "auto"
 MAX_VNC_DISPLAY_NUMBER = 65535 - 5900
 
 
@@ -100,7 +103,24 @@ class ConsoleVncConfig:
 
 @dataclass(frozen=True)
 class ConsoleLookingGlassConfig:
-    pass
+    shm_file: Path
+    binary: str = DEFAULT_LOOKING_GLASS_BINARY
+    renderer: str = DEFAULT_LOOKING_GLASS_RENDERER
+    fullscreen: bool = True
+    disable_host_screensaver: bool = True
+    spice_enabled: bool = True
+
+    @property
+    def argv(self) -> list[str]:
+        argv = [self.binary]
+        if self.fullscreen:
+            argv.append("-F")
+        if self.disable_host_screensaver:
+            argv.append("-S")
+        argv.extend(["-g", self.renderer, "-f", str(self.shm_file)])
+        if not self.spice_enabled:
+            argv.append("-s")
+        return argv
 
 
 @dataclass(frozen=True)
@@ -436,7 +456,50 @@ def _parse_console_config(
 
     _require_empty_table(spice_block, backend, "console.spice")
     _require_empty_table(vnc_block, backend, "console.vnc")
-    return ConsoleConfig(artifact_dir=artifact_dir, looking_glass=ConsoleLookingGlassConfig())
+    _require_only_keys(
+        looking_glass_block,
+        {
+            "binary",
+            "shm_file",
+            "renderer",
+            "fullscreen",
+            "disable_host_screensaver",
+            "spice_enabled",
+        },
+        "console.looking_glass",
+    )
+
+    renderer = _optional_non_empty_string(
+        looking_glass_block,
+        "renderer",
+        default=DEFAULT_LOOKING_GLASS_RENDERER,
+    )
+    if renderer not in SUPPORTED_LOOKING_GLASS_RENDERERS:
+        supported = ", ".join(sorted(SUPPORTED_LOOKING_GLASS_RENDERERS))
+        raise ConfigError(
+            "Unsupported console.looking_glass.renderer="
+            f"{renderer!r}; supported values: {supported}"
+        )
+
+    return ConsoleConfig(
+        artifact_dir=artifact_dir,
+        looking_glass=ConsoleLookingGlassConfig(
+            binary=_optional_non_empty_string(
+                looking_glass_block,
+                "binary",
+                default=DEFAULT_LOOKING_GLASS_BINARY,
+            ),
+            shm_file=_require_absolute_path(looking_glass_block, "shm_file"),
+            renderer=renderer,
+            fullscreen=_optional_bool(looking_glass_block, "fullscreen", default=True),
+            disable_host_screensaver=_optional_bool(
+                looking_glass_block,
+                "disable_host_screensaver",
+                default=True,
+            ),
+            spice_enabled=_optional_bool(looking_glass_block, "spice_enabled", default=True),
+        ),
+    )
 
 
 def _require_empty_table(block: dict[str, Any], backend: str, label: str) -> None:

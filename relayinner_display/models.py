@@ -31,6 +31,7 @@ class RuntimeState:
     console_backend: str = "spice"
     active_console_backend: str | None = None
     vnc_endpoint: str | None = None
+    looking_glass_shm_file: str | None = None
     vm_power_state: str = "unknown"
     session_ready: bool = False
     display_power_intent: str = "on"
@@ -81,6 +82,7 @@ class RuntimeState:
             "console_backend": self.console_backend,
             "active_console_backend": self.active_console_backend,
             "vnc_endpoint": self.vnc_endpoint,
+            "looking_glass_shm_file": self.looking_glass_shm_file,
             "appliance_state": self.session_state.public_value(),
             "session_state": self.session_state.value,
             "vm_power_state": self.vm_power_state,

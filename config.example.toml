@@ -25,6 +25,18 @@ vv_path = "/run/relayinner-display/console/spice-current.vv"
 # display_number = 77
 # viewer = "remote-viewer"
 
+# To use the Looking Glass backend instead, set console_backend = "looking-glass",
+# install the client yourself, and prepare GPU passthrough plus KVMFR/IVSHMEM
+# outside this installer. See https://looking-glass.io/docs/ for the upstream guide.
+#
+# [console.looking_glass]
+# shm_file = "/dev/kvmfr0"
+# binary = "looking-glass-client"
+# renderer = "auto"
+# fullscreen = true
+# disable_host_screensaver = true
+# spice_enabled = true
+
 [policy]
 poll_interval_ms = 2000
 reconnect_initial_ms = 1000

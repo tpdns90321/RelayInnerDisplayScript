@@ -2,7 +2,7 @@
 
 RelayInnerDisplayScript is a Proxmox-hosted display relay project for a single KVM guest.
 
-The target outcome is a small appliance-like runtime that takes one VM managed by Proxmox and mirrors it directly onto a monitor attached to the Proxmox host. The host should boot into a kiosk session, show the guest through SPICE or loopback-only VNC with `remote-viewer`, sleep or wake the monitor based on VM power state, and use the host power button as guest power control instead of shutting down the host.
+The target outcome is a small appliance-like runtime that takes one VM managed by Proxmox and mirrors it directly onto a monitor attached to the Proxmox host. The host should boot into a kiosk session, show the guest through SPICE or loopback-only VNC with `remote-viewer` or through Looking Glass with `looking-glass-client`, sleep or wake the monitor based on VM power state, and use the host power button as guest power control instead of shutting down the host.
 
 ## Status
 
@@ -19,12 +19,12 @@ This repository now includes Specs 10 through 17 of the current MVP plan plus Sp
 - Spec 17 now adds a root-owned `uninstall.sh`, install-state-aware host restoration, default config preservation, and an explicit purge path for full relay cleanup.
 - Spec 20 now generalizes the shared config, runtime artifact layout, IPC, session launch path, and runtime state around a backend-neutral console contract while keeping existing SPICE behavior intact.
 - Spec 21 now implements the loopback-only Proxmox VNC backend, including config validation, `qm config` matching, endpoint probing, runtime `vnc_endpoint` state, and `remote-viewer` URI launch.
-- Spec 22 still defines the pending Looking Glass backend implementation that will plug into the Spec 20 contract later.
+- Spec 22 now implements the preflight-only Looking Glass backend, including config validation, shared-memory preflight, runtime `looking_glass_shm_file` state, and fullscreen `looking-glass-client` launch wiring.
 - The current design still assumes direct installation on a Proxmox host, not an LXC container.
 
 ## Quickstart
 
-Use this install path only on a Proxmox VE host with `systemd`, a directly attached monitor, and one target guest that exposes either a SPICE display or an operator-prepared loopback-only VNC endpoint.
+Use this install path only on a Proxmox VE host with `systemd`, a directly attached monitor, and one target guest that exposes either a SPICE display, an operator-prepared loopback-only VNC endpoint, or a fully operator-prepared Looking Glass guest.
 
 1. Clone or copy this repository onto the Proxmox host and `cd` into the checkout.
 2. Run `sudo ./install.sh`.
@@ -33,6 +33,7 @@ Use this install path only on a Proxmox VE host with `systemd`, a directly attac
    - `[target].node_name`
    - `[target].console_backend` if you are switching away from the default SPICE path
    - `[console.vnc].display_number` plus matching VM `args: -vnc 127.0.0.1:<display_number>` when using `console_backend = "vnc"`
+   - `[console.looking_glass].shm_file` plus any renderer or SPICE overrides when using `console_backend = "looking-glass"`
    - `[display].output_name` if you want to pin a specific connector name; this is recommended when using the default `wlr-randr` helper on hosts with more than one connector
    - `[input].power_button_event` if the default evdev path does not match the host
 4. Restart the relay services after editing the config:
@@ -66,6 +67,8 @@ If `remote-viewer` starts and then exits with a generic dialog such as `Unable t
 
 If the appliance enters `degraded` with `backend=vnc`, verify that `qm config <vmid>` contains `args: -vnc 127.0.0.1:<display_number>` and that `[console.vnc].display_number` matches exactly. Non-loopback VNC binds are refused intentionally. If the VM is running but the kiosk stays in reconnecting flow, inspect `vnc_endpoint` in `/run/relayinner-display/daemon.state.json`; the relay waits there until the loopback VNC socket accepts TCP connections.
 
+If the appliance enters `degraded` with `backend=looking-glass`, verify that `looking-glass-client` is installed, `[console.looking_glass].shm_file` already exists, and the file or device is readable by the `relayinner-display` session user. This backend is preflight-only support; GPU passthrough, KVMFR/IVSHMEM device creation, and guest host-app installation remain operator-managed. The upstream setup guidance lives at <https://looking-glass.io/docs/stable/requirements/> and <https://looking-glass.io/docs/stable/install_client/>.
+
 ## Uninstall
 
 To remove the relay appliance and return the host to its normal local-login path, run:
@@ -87,7 +90,7 @@ For the detailed removal contract, best-effort fallback behavior, and post-unins
 ## MVP Goals
 
 - Relay one Proxmox VM to one host-attached display.
-- Use `Cage` as the kiosk shell and `remote-viewer` as the SPICE or VNC client.
+- Use `Cage` as the kiosk shell and a curated console client: `remote-viewer` for SPICE or VNC, `looking-glass-client` for Looking Glass.
 - Control the target VM locally with `qm` and `pvesh`.
 - Put the monitor into standby when the VM is off and wake it when the VM is active.
 - Map the host power button to guest start or graceful shutdown behavior.
@@ -114,14 +117,14 @@ The current MVP design assumes:
 
 Current implementation coverage:
 
-- `relayinner_display.config` now validates the shared TOML config model from Specs 10, 12, 13, 20, and 21, including the backend-neutral `[console]` namespace, loopback-only VNC settings, and legacy SPICE path compatibility.
+- `relayinner_display.config` now validates the shared TOML config model from Specs 10, 12, 13, 20, 21, and 22, including the backend-neutral `[console]` namespace, loopback-only VNC settings, Looking Glass preflight options, and legacy SPICE path compatibility.
 - `relayinner_display.proxmox` wraps local `qm` and `pvesh` calls, writes `remote-viewer` `.vv` files, validates loopback-only VNC `qm config` exposure, probes the derived VNC socket, and submits guest start/shutdown requests.
-- `relayinner_display.daemon` now owns the end-to-end appliance state machine, validates required runtime binaries, emits backend-neutral `connect_console` IPC, prepares SPICE or VNC console launches, degrades after repeated local Proxmox failures, captures host power-button intent, and writes the expanded runtime state contract to disk.
+- `relayinner_display.daemon` now owns the end-to-end appliance state machine, validates required runtime binaries, emits backend-neutral `connect_console` IPC, prepares SPICE, VNC, or Looking Glass console launches, runs Looking Glass shared-memory preflight, degrades after repeated local Proxmox failures, captures host power-button intent, and writes the expanded runtime state contract to disk.
 - `relayinner_display.input` validates host `logind` power-key policy and captures `KEY_POWER` presses from one evdev node.
-- `relayinner_display.session` now validates backend/launcher allowlists for generic console launches, keeps legacy `connect_spice` compatibility during the transition window, tracks waiting/degraded/display-sleeping session state, applies Wayland display-power actions through `wlr-randr` by default while preserving custom helper support, and emits subsystem-scoped session, console, and display logs.
+- `relayinner_display.session` now validates backend/launcher allowlists for generic console launches, keeps legacy `connect_spice` compatibility during the transition window, tracks waiting/degraded/display-sleeping session state, launches `looking-glass-client` on the same curated contract as `remote-viewer`, applies Wayland display-power actions through `wlr-randr` by default while preserving custom helper support, and emits subsystem-scoped session, console, and display logs.
 - `relayinner_display.kiosk` provides the Cage session entrypoint and the canonical `cage -- ...` command shape against the managed `relayinner-display-seatd.service`.
-- `relayinner_display.bootstrap` renders the sample config, systemd units, logind override, host-detected DRM supplementary groups for the kiosk unit, the Spec 15 `StartLimitIntervalSec=120` / `StartLimitBurst=5` restart-loop policy, the Spec 16 install-state record under `/var/lib/relayinner-display/install-state.json`, and the Spec 17 uninstall flow that restores `tty1` plus optional display-manager state conservatively.
-- `tests/` now cover config parsing, backend-neutral IPC validation, Proxmox command handling, SPICE and VNC reconnect logic, daemon DPMS debounce behavior, runtime-state/backend handling including `vnc_endpoint`, runtime dependency degradation, restart-threshold rendering, install-state persistence, uninstall fallback and purge behavior, session supervision, logind policy parsing, power-button handling, display-power handling, and kiosk entrypoint wiring.
+- `relayinner_display.bootstrap` renders the sample config, systemd units, logind override, host-detected DRM supplementary groups for the kiosk unit, the Spec 15 `StartLimitIntervalSec=120` / `StartLimitBurst=5` restart-loop policy, the Spec 16 install-state record under `/var/lib/relayinner-display/install-state.json`, the Spec 22 Looking Glass sample config hints, and the Spec 17 uninstall flow that restores `tty1` plus optional display-manager state conservatively.
+- `tests/` now cover config parsing, backend-neutral IPC validation, Proxmox command handling, SPICE, VNC, and Looking Glass reconnect logic, daemon DPMS debounce behavior, runtime-state/backend handling including `vnc_endpoint` and `looking_glass_shm_file`, runtime dependency degradation, restart-threshold rendering, install-state persistence, uninstall fallback and purge behavior, session supervision, logind policy parsing, power-button handling, display-power handling, and kiosk entrypoint wiring.
 
 Operationally, the appliance is expected to move through a small state machine:
 
@@ -164,7 +167,7 @@ Recommended implementation order:
 Console-backend expansion status:
 
 - Wave 1 is complete: Spec 20 generalized the shared console contract without regressing SPICE.
-- Wave 2 is in progress: Spec 21 now owns the implemented VNC path, while Spec 22 still owns Looking Glass preflight, launch wiring, and tests.
+- Wave 2 is complete: Spec 21 now owns the shipped VNC path, and Spec 22 now ships the preflight-only Looking Glass path on the same shared contract.
 
 ## Expected Host Dependencies
 
@@ -176,6 +179,8 @@ The MVP spec currently assumes these host-side packages or equivalents:
 - `seatd`
 - `virt-viewer`
 - `wlr-randr`
+
+When `console_backend = "looking-glass"`, operators also need a working `looking-glass-client` install plus the upstream guest/passthrough prerequisites described at <https://looking-glass.io/docs/stable/requirements/> and <https://looking-glass.io/docs/stable/install_client/>. The relay does not automate those steps.
 
 The current implementation now manages:
 
@@ -204,8 +209,8 @@ The current implementation now manages:
 └── tasks/
 ```
 
-- `relayinner_display/` holds the current Python runtime for Specs 10 through 17 plus the Spec 20 shared console contract layer and the Spec 21 VNC backend.
-- `config.example.toml` is the host bootstrap sample config installed by Specs 14, 16, 20, and 21.
+- `relayinner_display/` holds the current Python runtime for Specs 10 through 17 plus the Spec 20 shared console contract layer and the Spec 21/22 VNC and Looking Glass backends.
+- `config.example.toml` is the host bootstrap sample config installed by Specs 14, 16, 20, 21, and 22.
 - `docs/` holds operator-facing setup documentation for the host-direct install path.
 - `install.sh` is the idempotent host bootstrap entrypoint from Specs 14 and 16.
 - `uninstall.sh` is the safe removal entrypoint from Spec 17.

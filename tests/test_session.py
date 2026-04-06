@@ -105,6 +105,43 @@ class SessionSupervisorTests(unittest.TestCase):
             ["remote-viewer", "--full-screen", "vnc://127.0.0.1:5977"],
         )
 
+    def test_connect_console_launches_looking_glass_client(self) -> None:
+        launches: list[tuple[list[str], dict[str, str]]] = []
+
+        def fake_factory(command: list[str], env: dict[str, str], text: bool) -> FakeProcess:
+            launches.append((command, env))
+            return FakeProcess(pid=9003)
+
+        supervisor = SessionSupervisor(
+            config=build_config(backend="looking-glass"),
+            process_factory=fake_factory,
+        )
+        events = supervisor.handle_daemon_message(
+            {
+                "type": "connect_console",
+                "backend": "looking-glass",
+                "launcher": "looking-glass-client",
+                "argv": [
+                    "looking-glass-client",
+                    "-F",
+                    "-S",
+                    "-g",
+                    "auto",
+                    "-f",
+                    "/dev/kvmfr0",
+                ],
+            }
+        )
+
+        self.assertEqual(
+            events,
+            [{"type": "console_started", "backend": "looking-glass", "pid": 9003}],
+        )
+        self.assertEqual(
+            launches[0][0],
+            ["looking-glass-client", "-F", "-S", "-g", "auto", "-f", "/dev/kvmfr0"],
+        )
+
     def test_connect_spice_compatibility_emits_legacy_console_started(self) -> None:
         def fake_factory(command: list[str], env: dict[str, str], text: bool) -> FakeProcess:
             return FakeProcess(pid=9001)
@@ -204,6 +241,42 @@ class SessionSupervisorTests(unittest.TestCase):
         self.assertEqual(
             event,
             {"type": "console_exited", "backend": "spice", "code": 1, "signal": 0},
+        )
+        self.assertEqual(supervisor.view_state.status_text, "Connection lost")
+
+    def test_unexpected_looking_glass_exit_reports_console_exited_with_backend(self) -> None:
+        process = FakeProcess(pid=101)
+
+        def fake_factory(command: list[str], env: dict[str, str], text: bool) -> FakeProcess:
+            return process
+
+        supervisor = SessionSupervisor(
+            config=build_config(backend="looking-glass"),
+            process_factory=fake_factory,
+        )
+        supervisor.handle_daemon_message(
+            {
+                "type": "connect_console",
+                "backend": "looking-glass",
+                "launcher": "looking-glass-client",
+                "argv": [
+                    "looking-glass-client",
+                    "-F",
+                    "-S",
+                    "-g",
+                    "auto",
+                    "-f",
+                    "/dev/kvmfr0",
+                ],
+            }
+        )
+        process.returncode = 1
+
+        event = supervisor.poll_console()
+
+        self.assertEqual(
+            event,
+            {"type": "console_exited", "backend": "looking-glass", "code": 1, "signal": 0},
         )
         self.assertEqual(supervisor.view_state.status_text, "Connection lost")
 
@@ -323,6 +396,12 @@ def build_config(
     vnc_bind_host: str = "127.0.0.1",
     vnc_display_number: int = 77,
     vnc_viewer: str = "remote-viewer",
+    looking_glass_binary: str = "looking-glass-client",
+    looking_glass_shm_file: Path = Path("/dev/kvmfr0"),
+    looking_glass_renderer: str = "auto",
+    looking_glass_fullscreen: bool = True,
+    looking_glass_disable_host_screensaver: bool = True,
+    looking_glass_spice_enabled: bool = True,
     power_helper: str = "wlr-randr",
 ) -> AppConfig:
     run_dir = Path("/run/relayinner-display")
@@ -338,7 +417,16 @@ def build_config(
         )
         if backend == "vnc"
         else None,
-        looking_glass=ConsoleLookingGlassConfig() if backend == "looking-glass" else None,
+        looking_glass=ConsoleLookingGlassConfig(
+            binary=looking_glass_binary,
+            shm_file=looking_glass_shm_file,
+            renderer=looking_glass_renderer,
+            fullscreen=looking_glass_fullscreen,
+            disable_host_screensaver=looking_glass_disable_host_screensaver,
+            spice_enabled=looking_glass_spice_enabled,
+        )
+        if backend == "looking-glass"
+        else None,
     )
     return AppConfig(
         target=TargetConfig(

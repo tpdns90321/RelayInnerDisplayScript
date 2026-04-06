@@ -3,8 +3,10 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 import json
 import unittest
+from unittest.mock import patch
 
 from relayinner_display.config import (
     AppConfig,
@@ -310,6 +312,126 @@ class DisplayDaemonTests(unittest.TestCase):
                     }
                 ],
             )
+
+    def test_running_vm_connects_and_reconnects_after_looking_glass_exit(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            shm_file = Path(temp_dir) / "kvmfr0"
+            shm_file.write_text("ready", encoding="utf-8")
+            shm_file.chmod(0o644)
+            config = build_config(
+                Path(temp_dir),
+                backend="looking-glass",
+                looking_glass_shm_file=shm_file,
+            )
+            proxmox = FakeProxmoxClient(["running", "running"])
+            daemon = DisplayDaemon(config=config, proxmox=proxmox)
+            start_time = datetime(2026, 4, 4, 0, 0, tzinfo=timezone.utc)
+
+            daemon.prepare_runtime()
+            daemon.start(now=start_time)
+
+            ready_actions = daemon.handle_session_message({"type": "session_ready"}, now=start_time)
+            self.assertEqual(
+                ready_actions,
+                [
+                    {"type": "display_power", "state": "on", "output": ""},
+                    {"type": "show_waiting", "reason": "connecting"},
+                ],
+            )
+
+            tick_actions = daemon.tick(now=start_time)
+            self.assertEqual(
+                tick_actions,
+                [
+                    {
+                        "type": "connect_console",
+                        "backend": "looking-glass",
+                        "launcher": "looking-glass-client",
+                        "argv": [
+                            "looking-glass-client",
+                            "-F",
+                            "-S",
+                            "-g",
+                            "auto",
+                            "-f",
+                            str(shm_file),
+                        ],
+                    }
+                ],
+            )
+
+            daemon.handle_session_message(
+                {"type": "console_started", "backend": "looking-glass", "pid": 4321},
+                now=start_time,
+            )
+            exit_actions = daemon.handle_session_message(
+                {"type": "console_exited", "backend": "looking-glass", "code": 1, "signal": 0},
+                now=start_time,
+            )
+
+            self.assertEqual(exit_actions, [{"type": "show_waiting", "reason": "reconnecting"}])
+            reconnect_tick = daemon.tick(now=start_time + timedelta(milliseconds=1000))
+            self.assertEqual(
+                reconnect_tick,
+                [
+                    {
+                        "type": "connect_console",
+                        "backend": "looking-glass",
+                        "launcher": "looking-glass-client",
+                        "argv": [
+                            "looking-glass-client",
+                            "-F",
+                            "-S",
+                            "-g",
+                            "auto",
+                            "-f",
+                            str(shm_file),
+                        ],
+                    }
+                ],
+            )
+
+    def test_looking_glass_connect_message_honors_configured_flags(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            shm_file = Path(temp_dir) / "kvmfr0"
+            shm_file.write_text("ready", encoding="utf-8")
+            shm_file.chmod(0o644)
+            config = build_config(
+                Path(temp_dir),
+                backend="looking-glass",
+                looking_glass_binary="/usr/local/bin/looking-glass-client",
+                looking_glass_shm_file=shm_file,
+                looking_glass_renderer="egl",
+                looking_glass_fullscreen=False,
+                looking_glass_disable_host_screensaver=False,
+                looking_glass_spice_enabled=False,
+            )
+            daemon = DisplayDaemon(config=config, proxmox=FakeProxmoxClient(["running"]))
+            start_time = datetime(2026, 4, 4, 0, 0, tzinfo=timezone.utc)
+
+            daemon.prepare_runtime()
+            daemon.start(now=start_time)
+            daemon.handle_session_message({"type": "session_ready"}, now=start_time)
+            actions = daemon.tick(now=start_time)
+
+        self.assertEqual(
+            actions,
+            [
+                {
+                    "type": "connect_console",
+                    "backend": "looking-glass",
+                    "launcher": "/usr/local/bin/looking-glass-client",
+                    "argv": [
+                        "/usr/local/bin/looking-glass-client",
+                        "-g",
+                        "egl",
+                        "-f",
+                        str(shm_file),
+                        "-s",
+                    ],
+                }
+            ],
+        )
 
     def test_initial_off_state_waits_before_sleeping(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -681,6 +803,41 @@ class DisplayDaemonTests(unittest.TestCase):
         self.assertEqual(daemon.state.session_state, SessionState.DEGRADED)
         self.assertEqual(daemon.state.degraded_reason, "Missing required binary: remote-viewer")
 
+    def test_looking_glass_missing_binary_enters_degraded_at_startup(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            shm_file = Path(temp_dir) / "kvmfr0"
+            shm_file.write_text("ready", encoding="utf-8")
+            shm_file.chmod(0o644)
+            config = build_config(
+                Path(temp_dir),
+                backend="looking-glass",
+                looking_glass_shm_file=shm_file,
+            )
+            daemon = DisplayDaemon(
+                config=config,
+                proxmox=FakeProxmoxClient(["running"]),
+                dependency_finder=lambda name: (
+                    None if name == "looking-glass-client" else f"/usr/bin/{Path(name).name}"
+                ),
+            )
+            start_time = datetime(2026, 4, 4, 0, 0, tzinfo=timezone.utc)
+
+            with patch(
+                "relayinner_display.daemon.pwd.getpwnam",
+                return_value=SimpleNamespace(
+                    pw_name="relayinner-display",
+                    pw_uid=1001,
+                    pw_gid=1001,
+                ),
+            ), patch("relayinner_display.daemon.grp.getgrall", return_value=[]):
+                daemon.prepare_runtime()
+                daemon.start(now=start_time)
+                actions = daemon.handle_session_message({"type": "session_ready"}, now=start_time)
+
+        self.assertEqual(actions, [{"type": "show_waiting", "reason": "degraded"}])
+        self.assertEqual(daemon.state.session_state, SessionState.DEGRADED)
+        self.assertEqual(daemon.state.degraded_reason, "Missing required binary: looking-glass-client")
+
     def test_vnc_endpoint_not_yet_reachable_enters_reconnect_flow(self) -> None:
         with TemporaryDirectory() as temp_dir:
             config = build_config(Path(temp_dir), backend="vnc")
@@ -735,22 +892,62 @@ class DisplayDaemonTests(unittest.TestCase):
             "VM config exposes VNC on non-loopback bind_host='0.0.0.0'",
         )
 
-    def test_unimplemented_console_backend_enters_degraded_with_backend_name(self) -> None:
+    def test_looking_glass_missing_shm_file_enters_degraded_with_clear_reason(self) -> None:
         with TemporaryDirectory() as temp_dir:
-            config = build_config(Path(temp_dir), backend="looking-glass")
+            config = build_config(
+                Path(temp_dir),
+                backend="looking-glass",
+                looking_glass_shm_file=Path(temp_dir) / "missing-kvmfr0",
+            )
             daemon = DisplayDaemon(config=config, proxmox=FakeProxmoxClient(["running"]))
             start_time = datetime(2026, 4, 4, 0, 0, tzinfo=timezone.utc)
 
             daemon.prepare_runtime()
             daemon.start(now=start_time)
-            daemon.handle_session_message({"type": "session_ready"}, now=start_time)
-            actions = daemon.tick(now=start_time)
+            actions = daemon.handle_session_message({"type": "session_ready"}, now=start_time)
 
         self.assertEqual(actions, [{"type": "show_waiting", "reason": "degraded"}])
         self.assertEqual(daemon.state.session_state, SessionState.DEGRADED)
         self.assertEqual(
             daemon.state.degraded_reason,
-            "Console preparation failed for backend=looking-glass: not implemented",
+            f"Looking Glass shared memory path does not exist: {Path(temp_dir) / 'missing-kvmfr0'}",
+        )
+
+    def test_looking_glass_unreadable_shm_file_enters_degraded_with_clear_reason(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            shm_file = Path(temp_dir) / "kvmfr0"
+            shm_file.write_text("ready", encoding="utf-8")
+            shm_file.chmod(0o600)
+            config = build_config(
+                Path(temp_dir),
+                backend="looking-glass",
+                looking_glass_shm_file=shm_file,
+            )
+            daemon = DisplayDaemon(
+                config=config,
+                proxmox=FakeProxmoxClient(["running"]),
+                dependency_finder=lambda name: f"/usr/bin/{Path(name).name}",
+            )
+            start_time = datetime(2026, 4, 4, 0, 0, tzinfo=timezone.utc)
+
+            with patch(
+                "relayinner_display.daemon.pwd.getpwnam",
+                return_value=SimpleNamespace(
+                    pw_name="relayinner-display",
+                    pw_uid=2000,
+                    pw_gid=2000,
+                ),
+            ), patch("relayinner_display.daemon.grp.getgrall", return_value=[]):
+                daemon.prepare_runtime()
+                daemon.start(now=start_time)
+                actions = daemon.handle_session_message({"type": "session_ready"}, now=start_time)
+
+        self.assertEqual(actions, [{"type": "show_waiting", "reason": "degraded"}])
+        self.assertEqual(daemon.state.session_state, SessionState.DEGRADED)
+        self.assertEqual(
+            daemon.state.degraded_reason,
+            "Looking Glass shared memory path is not readable by session user "
+            f"relayinner-display: {shm_file}",
         )
 
     def test_repeated_proxmox_failures_enter_degraded_after_retry_budget(self) -> None:
@@ -819,6 +1016,27 @@ class DisplayDaemonTests(unittest.TestCase):
         self.assertEqual(payload["console_backend"], "vnc")
         self.assertEqual(payload["vnc_endpoint"], "127.0.0.1:5977")
 
+    def test_state_file_includes_looking_glass_shm_file_for_backend(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            shm_file = Path(temp_dir) / "kvmfr0"
+            shm_file.write_text("ready", encoding="utf-8")
+            shm_file.chmod(0o644)
+            config = build_config(
+                Path(temp_dir),
+                backend="looking-glass",
+                looking_glass_shm_file=shm_file,
+            )
+            daemon = DisplayDaemon(config=config, proxmox=FakeProxmoxClient(["stopped"]))
+            start_time = datetime(2026, 4, 4, 0, 0, tzinfo=timezone.utc)
+
+            daemon.prepare_runtime()
+            daemon.start(now=start_time)
+
+            payload = json.loads(config.runtime.daemon_state_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(payload["console_backend"], "looking-glass")
+        self.assertEqual(payload["looking_glass_shm_file"], str(shm_file))
+
 
 def build_config(
     root: Path,
@@ -827,6 +1045,12 @@ def build_config(
     vnc_bind_host: str = "127.0.0.1",
     vnc_display_number: int = 77,
     vnc_viewer: str = "remote-viewer",
+    looking_glass_binary: str = "looking-glass-client",
+    looking_glass_shm_file: Path | None = None,
+    looking_glass_renderer: str = "auto",
+    looking_glass_fullscreen: bool = True,
+    looking_glass_disable_host_screensaver: bool = True,
+    looking_glass_spice_enabled: bool = True,
     output_name: str = "",
     power_helper: str = "wlr-randr",
     dpms_off_delay_ms: int = 5000,
@@ -847,7 +1071,16 @@ def build_config(
         )
         if backend == "vnc"
         else None,
-        looking_glass=ConsoleLookingGlassConfig() if backend == "looking-glass" else None,
+        looking_glass=ConsoleLookingGlassConfig(
+            binary=looking_glass_binary,
+            shm_file=looking_glass_shm_file or root / "kvmfr0",
+            renderer=looking_glass_renderer,
+            fullscreen=looking_glass_fullscreen,
+            disable_host_screensaver=looking_glass_disable_host_screensaver,
+            spice_enabled=looking_glass_spice_enabled,
+        )
+        if backend == "looking-glass"
+        else None,
     )
     return AppConfig(
         target=TargetConfig(

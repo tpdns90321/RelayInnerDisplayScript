@@ -6,7 +6,7 @@ This MVP supports one deployment path: direct installation onto a Proxmox VE hos
 
 - Proxmox VE host with `systemd`
 - root shell access
-- A target VM that exposes either a SPICE display or an operator-prepared loopback-only VNC endpoint
+- A target VM that exposes either a SPICE display, an operator-prepared loopback-only VNC endpoint, or a fully operator-prepared Looking Glass guest
 - Package sources that can install:
   - `python3`
   - `python3-evdev`
@@ -22,8 +22,9 @@ This MVP supports one deployment path: direct installation onto a Proxmox VE hos
 3. Edit `/etc/relayinner-display/config.toml` and set at least:
    - `[target].vmid`
    - `[target].node_name`
-   - `[target].console_backend` if you are switching from the default SPICE path to VNC
+   - `[target].console_backend` if you are switching from the default SPICE path
    - `[console.vnc].display_number` plus matching VM `args: -vnc 127.0.0.1:<display_number>` when using `console_backend = "vnc"`
+   - `[console.looking_glass].shm_file` plus any renderer or SPICE overrides when using `console_backend = "looking-glass"`
    - `[display].output_name` if you want to pin a specific connector name; this is recommended when the default `wlr-randr` helper should target one physical connector only
    - `[input].power_button_event` if the default evdev path does not match the host
 4. Start the services after editing the config:
@@ -62,6 +63,36 @@ viewer = "remote-viewer"
 ```
 
 The relay derives TCP port `5900 + display_number`, launches `remote-viewer --full-screen vnc://<bind_host>:<port>`, and refuses to run if `qm config <vmid>` exposes VNC on any non-loopback address or on a different display number. The installer does not rewrite VM config for you.
+
+## Looking Glass Backend
+
+Use `console_backend = "looking-glass"` only after the guest already satisfies the upstream Looking Glass requirements. This relay backend is intentionally preflight-only support:
+
+- the installer does not create `/dev/kvmfr*`
+- the installer does not configure GPU passthrough or VFIO
+- the installer does not install the guest-side Looking Glass host application
+
+Configure the relay like this:
+
+```toml
+[target]
+console_backend = "looking-glass"
+
+[console.looking_glass]
+shm_file = "/dev/kvmfr0"
+binary = "looking-glass-client"
+renderer = "auto"
+fullscreen = true
+disable_host_screensaver = true
+spice_enabled = true
+```
+
+At runtime the daemon verifies that the configured client binary exists, that `shm_file` already exists, and that the `relayinner-display` session user can read the file or device before it launches `looking-glass-client` in the kiosk session. If any of those visible host-side prerequisites fail, the appliance moves into controlled `degraded` state instead of showing a blank screen.
+
+For the required host and guest preparation, follow the upstream documentation:
+
+- <https://looking-glass.io/docs/stable/requirements/>
+- <https://looking-glass.io/docs/stable/install_client/>
 
 ## Uninstall
 
@@ -165,6 +196,11 @@ The runtime state file now records the public appliance state and key fault mark
 - `degraded_reason`
 - `last_console_exit`
 
+When VNC or Looking Glass is selected, the same state file also includes backend-specific troubleshooting metadata:
+
+- `vnc_endpoint`
+- `looking_glass_shm_file`
+
 If power-button forwarding is enabled, confirm the logind override is active:
 
 ```sh
@@ -184,7 +220,7 @@ When the appliance is not showing the guest, inspect the state file first:
 Then inspect journald by subsystem:
 
 - `relayinner-display.proxmox` for `qm`/`pvesh` failures and retry exhaustion
-- `relayinner-display.console` for `remote-viewer` launch or exit problems
+- `relayinner-display.console` for `remote-viewer` or `looking-glass-client` launch, exit, and preflight problems
 - `relayinner-display.display` for display power helper failures
 - `relayinner-display.input` for host power-button validation or evdev read failures
 - `relayinner-display.session` for session connection and state-transition events
@@ -206,3 +242,7 @@ If the daemon logs `Prepared console launch for VM ... with backend=spice` and `
 If the state file or journal shows `console_backend=vnc` and the appliance moves into `degraded`, verify that `qm config <vmid>` contains a loopback-only `args: -vnc 127.0.0.1:<display_number>` entry and that `[console.vnc].display_number` matches it exactly. Non-loopback binds such as `0.0.0.0` are refused intentionally.
 
 If the VNC backend stays in the reconnecting path while the VM is running, inspect `vnc_endpoint` in `/run/relayinner-display/daemon.state.json` and confirm the derived host-local port is actually listening before `remote-viewer` launches. The relay probes the loopback endpoint before each launch and waits in reconnect flow until the socket accepts TCP connections.
+
+If the state file or journal shows `console_backend=looking-glass` and the appliance moves into `degraded`, verify that `looking_glass_shm_file` matches the expected KVMFR or IVSHMEM device, that the file already exists before the daemon starts, and that the `relayinner-display` session user can read it. Missing or unreadable shared memory is treated as a hard preflight failure by design.
+
+If Looking Glass reconnects repeatedly while the guest stays up, inspect the console log lines for `backend=looking-glass` and confirm the guest-side host application plus upstream passthrough setup are healthy. The relay only validates host-visible prerequisites; it does not diagnose guest-side capture or passthrough failures beyond that boundary.
