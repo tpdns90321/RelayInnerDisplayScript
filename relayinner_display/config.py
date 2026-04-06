@@ -140,6 +140,13 @@ class ConsoleMoonlightConfig:
     state_dir: Path = DEFAULT_MOONLIGHT_STATE_DIR
     quit_app_after_session: bool = False
 
+    def __post_init__(self) -> None:
+        if self.quit_app_after_session and self.app.casefold() == DEFAULT_MOONLIGHT_APP.casefold():
+            raise ConfigError(
+                "console.moonlight.quit_app_after_session=true is not valid when "
+                "console.moonlight.app='Desktop'"
+            )
+
     @property
     def host_authority(self) -> str:
         return _render_moonlight_host_authority(self.host, self.base_port)
@@ -159,7 +166,7 @@ class ConsoleMoonlightConfig:
             "fullscreen",
         ]
         if self.quit_app_after_session:
-            argv.append("--quit-app-after")
+            argv.append("--quit-after")
         return argv
 
 

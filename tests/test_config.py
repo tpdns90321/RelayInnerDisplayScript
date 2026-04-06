@@ -494,6 +494,24 @@ class ConfigTests(unittest.TestCase):
             with self.assertRaises(ConfigError):
                 load_config(config_path)
 
+    def test_moonlight_desktop_cannot_enable_quit_after_session(self) -> None:
+        content = VALID_CONFIG.replace('console_backend = "spice"', 'console_backend = "moonlight"')
+        content = content.replace(
+            "[console.spice]\nvv_path = \"/run/relayinner-display/console/spice-current.vv\"\n",
+            (
+                "[console.moonlight]\n"
+                "host = \"192.168.50.20\"\n"
+                "app = \"Desktop\"\n"
+                "quit_app_after_session = true\n"
+            ),
+        )
+        with TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "config.toml"
+            config_path.write_text(content, encoding="utf-8")
+
+            with self.assertRaises(ConfigError):
+                load_config(config_path)
+
     def test_invalid_dpms_policy_raises(self) -> None:
         content = VALID_CONFIG + '\ndpms_policy = "host-suspend"\n'
         with TemporaryDirectory() as temp_dir:

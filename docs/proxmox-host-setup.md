@@ -99,7 +99,7 @@ For the required host and guest preparation, follow the upstream documentation:
 
 ## Moonlight Backend
 
-Use `console_backend = "moonlight"` only after the guest already runs Sunshine and the Proxmox host already has Linux `moonlight-qt` version `6.0.0` or newer. The current Specs 30 and 31 slice covers the backend contract, persistent workspace, PIN-assist pairing, and direct `moonlight stream` launch:
+Use `console_backend = "moonlight"` only after the guest already runs Sunshine and the Proxmox host already has Linux `moonlight-qt` version `6.0.0` or newer. The current Specs 30 through 32 slice covers the backend contract, persistent workspace, PIN-assist pairing, live app validation, direct `moonlight stream` launch, and reconnect behavior:
 
 - the installer does not configure Sunshine inside the guest
 - the relay does not store Sunshine usernames or passwords
@@ -120,11 +120,15 @@ state_dir = "/var/lib/relayinner-display/moonlight"
 quit_app_after_session = false
 ```
 
-At runtime the daemon verifies that the configured Moonlight binary exists and reports version `6.0.0` or newer, prepares `state_dir` plus `portable.dat`, probes TCP reachability to the configured Sunshine host, and uses `moonlight list <host-authority> --csv` from that managed workspace to decide whether the host is already paired. If `base_port` differs from `47989`, the relay renders `host:port` for hostnames and IPv4 or `[ipv6]:port` for IPv6 literals before invoking Moonlight.
+`app` is matched case-insensitively against the live Sunshine app list from `moonlight list --csv`. `quit_app_after_session = true` is valid only for non-`Desktop` apps; the `Desktop` entry is treated as a stream surface, not a relay-managed launchable program.
 
-If the host is reachable but not paired, the daemon generates a 4-digit PIN, issues `moonlight pair <host-authority> --pin <pin>`, and moves the kiosk into `waiting_for_pairing`. Approve that PIN in the Sunshine web UI `PIN` page on the guest-side host; once `moonlight list` succeeds, the relay clears the PIN and continues to `moonlight stream` automatically. The paired-host state remains in `state_dir` across daemon and host restarts.
+At runtime the daemon verifies that the configured Moonlight binary exists and reports version `6.0.0` or newer, prepares `state_dir` plus `portable.dat`, probes TCP reachability to the configured Sunshine host, and uses `moonlight list <host-authority> --csv` from that managed workspace both to decide whether the host is already paired and to verify that the configured app exists before launch. If `base_port` differs from `47989`, the relay renders `host:port` for hostnames and IPv4 or `[ipv6]:port` for IPv6 literals before invoking Moonlight.
 
-Sunshine setup inside the guest still remains operator-managed, and Spec 32 still owns richer Moonlight recovery and launch-ops behavior beyond this PIN-assist flow.
+If the host is reachable but not paired, the daemon generates a 4-digit PIN, issues `moonlight pair <host-authority> --pin <pin>`, and moves the kiosk into `waiting_for_pairing`. Approve that PIN in the Sunshine web UI `PIN` page on the guest-side host; once `moonlight list` succeeds, the relay clears the PIN and continues to `moonlight stream <host-authority> <app> --display-mode fullscreen` automatically. The relay appends `--quit-after` only when `quit_app_after_session = true`. The paired-host state remains in `state_dir` across daemon and host restarts.
+
+If the configured app name does not exist in the live app list, the appliance enters controlled `degraded` state with a backend-tagged reason instead of launching an empty fullscreen Moonlight session. If Moonlight exits unexpectedly while the VM stays running and the Sunshine host remains reachable, the relay re-enters reconnect flow and repeats the same preflight checks before relaunching.
+
+Sunshine setup inside the guest still remains operator-managed, including app catalog definitions such as `Desktop`.
 
 ## Uninstall
 
@@ -234,6 +238,7 @@ When VNC, Looking Glass, or Moonlight is selected, the same state file also incl
 - `looking_glass_shm_file`
 - `moonlight_host`
 - `moonlight_base_port`
+- `moonlight_app`
 - `moonlight_pair_state`
 - `moonlight_pair_pin` while pairing approval is pending
 
@@ -286,4 +291,6 @@ If Looking Glass reconnects repeatedly while the guest stays up, inspect the con
 
 If the state file shows `appliance_state=waiting_for_pairing`, open the Sunshine web UI on the guest-side host, go to the `PIN` page, and enter the current `moonlight_pair_pin` shown on the kiosk or in `/run/relayinner-display/daemon.state.json`. The relay rotates that PIN after 300 seconds if approval has not completed yet.
 
-If the state file or journal shows `console_backend=moonlight` and the appliance moves into `degraded`, verify that Linux `moonlight-qt` `6.0.0` or newer is installed, that `[console.moonlight].host` and `base_port` point at the expected Sunshine host, and that the configured `state_dir` plus `portable.dat` are present and writable by the `relayinner-display` session user. The relay now manages the Moonlight workspace plus short-lived PIN assist there, but it still does not store Sunshine credentials and Spec 32 still owns richer recovery behavior.
+If the state file or journal shows `console_backend=moonlight` and the appliance moves into `degraded`, verify that Linux `moonlight-qt` `6.0.0` or newer is installed, that `[console.moonlight].host`, `base_port`, and `app` point at the expected Sunshine host and app, and that the configured `state_dir` plus `portable.dat` are present and writable by the `relayinner-display` session user. Check `moonlight_app` in `/run/relayinner-display/daemon.state.json` against `moonlight list <host-authority> --csv`; the relay matches app names case-insensitively but requires an exact app-name match, and `quit_app_after_session = true` is only valid for non-`Desktop` apps.
+
+If Moonlight reconnects repeatedly while the VM stays running, inspect `relayinner-display.console` log lines for `backend=moonlight` and confirm that the Sunshine host is still reachable and that the configured app still exists in the live Sunshine app list. The relay re-validates both before each relaunch.

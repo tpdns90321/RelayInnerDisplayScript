@@ -205,6 +205,48 @@ class SessionSupervisorTests(unittest.TestCase):
         )
         self.assertEqual(launches[0][1], "/var/lib/relayinner-display/moonlight")
 
+    def test_connect_console_launches_moonlight_with_quit_after_when_enabled(self) -> None:
+        launches: list[tuple[list[str], str | None, dict[str, str]]] = []
+
+        def fake_factory(
+            command: list[str],
+            cwd: str | None = None,
+            env: dict[str, str] | None = None,
+            text: bool = True,
+        ) -> FakeProcess:
+            launches.append((command, cwd, env or {}))
+            return FakeProcess(pid=9005)
+
+        config = build_config(
+            backend="moonlight",
+            moonlight_app="Steam Big Picture",
+            moonlight_quit_app_after_session=True,
+        )
+        supervisor = SessionSupervisor(config=config, process_factory=fake_factory)
+        events = supervisor.handle_daemon_message(
+            {
+                "type": "connect_console",
+                "backend": "moonlight",
+                "launcher": "moonlight",
+                "cwd": "/var/lib/relayinner-display/moonlight",
+                "argv": config.console.moonlight.argv,
+            }
+        )
+
+        self.assertEqual(events, [{"type": "console_started", "backend": "moonlight", "pid": 9005}])
+        self.assertEqual(
+            launches[0][0],
+            [
+                "moonlight",
+                "stream",
+                "192.168.50.20",
+                "Steam Big Picture",
+                "--display-mode",
+                "fullscreen",
+                "--quit-after",
+            ],
+        )
+
     def test_connect_spice_compatibility_emits_legacy_console_started(self) -> None:
         def fake_factory(
             command: list[str],

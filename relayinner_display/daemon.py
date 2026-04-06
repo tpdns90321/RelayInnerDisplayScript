@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from argparse import ArgumentParser
+import csv
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import random
@@ -70,6 +71,31 @@ def subsystem_logger(namespace: str, subsystem: str) -> logging.Logger:
 
 def generate_moonlight_pin() -> str:
     return f"{random.SystemRandom().randrange(10000):04d}"
+
+
+def parse_moonlight_app_list_csv(output: str) -> list[str]:
+    rows = [
+        [field.strip() for field in row]
+        for row in csv.reader(output.splitlines())
+        if any(field.strip() for field in row)
+    ]
+    if not rows:
+        return []
+
+    name_index = 0
+    header = [field.casefold() for field in rows[0]]
+    if "name" in header:
+        name_index = header.index("name")
+        rows = rows[1:]
+
+    app_names: list[str] = []
+    for row in rows:
+        if name_index >= len(row):
+            continue
+        app_name = row[name_index].strip()
+        if app_name:
+            app_names.append(app_name)
+    return app_names
 
 
 class SessionSocketServer:
@@ -207,6 +233,9 @@ class DisplayDaemon:
                 config.console.moonlight.base_port
                 if config.console.moonlight is not None
                 else None
+            ),
+            moonlight_app=(
+                config.console.moonlight.app if config.console.moonlight is not None else None
             ),
         )
         self.session_ready = False
@@ -766,10 +795,16 @@ class DisplayDaemon:
             return True, [{"type": "show_waiting", "reason": "reconnecting"}]
 
         self.next_reconnect_at = None
-        if self._moonlight_list_succeeds():
+        available_apps = self._moonlight_list_apps()
+        if available_apps is not None:
             self._set_moonlight_pair_state(MoonlightPairState.PAIRED)
             self.state.moonlight_pair_pin = None
             self.moonlight_pair_requested_at = None
+            if not self._moonlight_app_is_available(available_apps):
+                raise RuntimeValidationError(
+                    "Configured Moonlight app is not available on "
+                    f"{moonlight.host_authority}: {moonlight.app}"
+                )
             self.state.last_error = None
             return False, []
 
@@ -839,13 +874,23 @@ class DisplayDaemon:
             return False
         return True
 
-    def _moonlight_list_succeeds(self) -> bool:
+    def _moonlight_app_is_available(self, available_apps: list[str]) -> bool:
+        moonlight = self.config.console.moonlight
+        if moonlight is None:
+            raise AssertionError("Moonlight backend selected without console.moonlight config")
+
+        configured_app = moonlight.app.strip().casefold()
+        return any(app.strip().casefold() == configured_app for app in available_apps)
+
+    def _moonlight_list_apps(self) -> list[str] | None:
         moonlight = self.config.console.moonlight
         if moonlight is None:
             raise AssertionError("Moonlight backend selected without console.moonlight config")
 
         completed = self._run_moonlight_command(["list", moonlight.host_authority])
-        return completed.returncode == 0
+        if completed.returncode != 0:
+            return None
+        return parse_moonlight_app_list_csv(completed.stdout)
 
     def _issue_moonlight_pair(self, pin: str) -> None:
         moonlight = self.config.console.moonlight
@@ -987,8 +1032,9 @@ class DisplayDaemon:
                 raise AssertionError("Moonlight backend selected without console.moonlight config")
 
             self.console_logger.info(
-                "Prepared Moonlight launch for VM %s at %s from workspace=%s",
+                "Prepared Moonlight launch for VM %s with backend=moonlight app=%s host=%s workspace=%s",
                 self.state.vmid,
+                moonlight.app,
                 moonlight.host_authority,
                 moonlight.state_dir,
             )
