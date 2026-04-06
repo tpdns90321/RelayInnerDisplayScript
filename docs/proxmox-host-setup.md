@@ -6,7 +6,7 @@ This MVP supports one deployment path: direct installation onto a Proxmox VE hos
 
 - Proxmox VE host with `systemd`
 - root shell access
-- A target VM that exposes a SPICE display
+- A target VM that exposes either a SPICE display or an operator-prepared loopback-only VNC endpoint
 - Package sources that can install:
   - `python3`
   - `python3-evdev`
@@ -22,6 +22,8 @@ This MVP supports one deployment path: direct installation onto a Proxmox VE hos
 3. Edit `/etc/relayinner-display/config.toml` and set at least:
    - `[target].vmid`
    - `[target].node_name`
+   - `[target].console_backend` if you are switching from the default SPICE path to VNC
+   - `[console.vnc].display_number` plus matching VM `args: -vnc 127.0.0.1:<display_number>` when using `console_backend = "vnc"`
    - `[display].output_name` if you want to pin a specific connector name; this is recommended when the default `wlr-randr` helper should target one physical connector only
    - `[input].power_button_event` if the default evdev path does not match the host
 4. Start the services after editing the config:
@@ -38,6 +40,28 @@ Installer flags:
 - `./install.sh --replace-config` backs up the existing `/etc/relayinner-display/config.toml` and replaces it with the sample config.
 
 Successful installer runs also rewrite `/var/lib/relayinner-display/install-state.json`. Re-running without `--replace-config` preserves the current config and records `config_state.action=preserved`; re-running with `--replace-config` records `config_state.action=replaced` plus the backup path created during that run.
+
+## VNC Backend
+
+Use `console_backend = "vnc"` only after the target VM has been prepared with a loopback-only VNC bind in Proxmox VM config. The supported shape is:
+
+```text
+args: -vnc 127.0.0.1:77
+```
+
+Then configure the relay to match:
+
+```toml
+[target]
+console_backend = "vnc"
+
+[console.vnc]
+bind_host = "127.0.0.1"
+display_number = 77
+viewer = "remote-viewer"
+```
+
+The relay derives TCP port `5900 + display_number`, launches `remote-viewer --full-screen vnc://<bind_host>:<port>`, and refuses to run if `qm config <vmid>` exposes VNC on any non-loopback address or on a different display number. The installer does not rewrite VM config for you.
 
 ## Uninstall
 
@@ -178,3 +202,7 @@ If `runuser -u relayinner-display -- /usr/local/lib/relayinner-display/session-e
 If the display helper logs `Wayland server does not support wlr-output-power-management-v1`, the host is still configured for `wlopm`. Cage supports output management through `wlr-randr` more broadly than it supports the `wlopm` protocol, so rerun `sudo ./install.sh` and keep `power_helper = "wlr-randr"` unless you have confirmed `wlopm` support on that compositor build.
 
 If the daemon logs `Prepared console launch for VM ... with backend=spice` and `Console started: backend=spice pid=...` but the viewer immediately closes with a dialog like `Unable to connect graphic server /run/relayinner-display/console/spice-current.vv`, inspect the generated `.vv` file. Proxmox returns the `ca` certificate with escaped newlines, and the relay writer must keep that value escaped on one `ca=...` line; literal embedded newlines break the INI format and can cause `remote-viewer` to fail before the SPICE session opens.
+
+If the state file or journal shows `console_backend=vnc` and the appliance moves into `degraded`, verify that `qm config <vmid>` contains a loopback-only `args: -vnc 127.0.0.1:<display_number>` entry and that `[console.vnc].display_number` matches it exactly. Non-loopback binds such as `0.0.0.0` are refused intentionally.
+
+If the VNC backend stays in the reconnecting path while the VM is running, inspect `vnc_endpoint` in `/run/relayinner-display/daemon.state.json` and confirm the derived host-local port is actually listening before `remote-viewer` launches. The relay probes the loopback endpoint before each launch and waits in reconnect flow until the socket accepts TCP connections.

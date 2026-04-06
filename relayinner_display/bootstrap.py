@@ -209,6 +209,14 @@ def render_sample_config() -> str:
         [console.spice]
         vv_path = "/run/relayinner-display/console/spice-current.vv"
 
+        # To use the VNC backend instead, set console_backend = "vnc", prepare the VM with:
+        # args: -vnc 127.0.0.1:77
+        #
+        # [console.vnc]
+        # bind_host = "127.0.0.1"
+        # display_number = 77
+        # viewer = "remote-viewer"
+
         [policy]
         poll_interval_ms = 2000
         reconnect_initial_ms = 1000

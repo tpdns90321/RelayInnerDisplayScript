@@ -75,6 +75,36 @@ class SessionSupervisorTests(unittest.TestCase):
             ["remote-viewer", "--full-screen", "/run/relayinner-display/console/spice-current.vv"],
         )
 
+    def test_connect_console_launches_remote_viewer_for_vnc(self) -> None:
+        launches: list[tuple[list[str], dict[str, str]]] = []
+
+        def fake_factory(command: list[str], env: dict[str, str], text: bool) -> FakeProcess:
+            launches.append((command, env))
+            return FakeProcess(pid=9002)
+
+        supervisor = SessionSupervisor(
+            config=build_config(backend="vnc"),
+            process_factory=fake_factory,
+        )
+        events = supervisor.handle_daemon_message(
+            {
+                "type": "connect_console",
+                "backend": "vnc",
+                "launcher": "remote-viewer",
+                "argv": [
+                    "remote-viewer",
+                    "--full-screen",
+                    "vnc://127.0.0.1:5977",
+                ],
+            }
+        )
+
+        self.assertEqual(events, [{"type": "console_started", "backend": "vnc", "pid": 9002}])
+        self.assertEqual(
+            launches[0][0],
+            ["remote-viewer", "--full-screen", "vnc://127.0.0.1:5977"],
+        )
+
     def test_connect_spice_compatibility_emits_legacy_console_started(self) -> None:
         def fake_factory(command: list[str], env: dict[str, str], text: bool) -> FakeProcess:
             return FakeProcess(pid=9001)
@@ -290,6 +320,9 @@ class SessionSupervisorTests(unittest.TestCase):
 def build_config(
     *,
     backend: str = "spice",
+    vnc_bind_host: str = "127.0.0.1",
+    vnc_display_number: int = 77,
+    vnc_viewer: str = "remote-viewer",
     power_helper: str = "wlr-randr",
 ) -> AppConfig:
     run_dir = Path("/run/relayinner-display")
@@ -298,7 +331,13 @@ def build_config(
         spice=ConsoleSpiceConfig(vv_path=run_dir / "console" / "spice-current.vv")
         if backend == "spice"
         else None,
-        vnc=ConsoleVncConfig() if backend == "vnc" else None,
+        vnc=ConsoleVncConfig(
+            display_number=vnc_display_number,
+            bind_host=vnc_bind_host,
+            viewer=vnc_viewer,
+        )
+        if backend == "vnc"
+        else None,
         looking_glass=ConsoleLookingGlassConfig() if backend == "looking-glass" else None,
     )
     return AppConfig(

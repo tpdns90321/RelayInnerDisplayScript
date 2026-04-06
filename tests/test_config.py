@@ -149,7 +149,7 @@ class ConfigTests(unittest.TestCase):
         content = VALID_CONFIG.replace('console_backend = "spice"', 'console_backend = "vnc"')
         content = content.replace(
             "[console.spice]\nvv_path = \"/run/relayinner-display/console/spice-current.vv\"\n",
-            "[console.vnc]\n",
+            "[console.vnc]\ndisplay_number = 77\n",
         )
 
         with TemporaryDirectory() as temp_dir:
@@ -160,6 +160,10 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.target.console_backend, "vnc")
         self.assertIsNotNone(config.console.vnc)
         self.assertIsNone(config.console.spice)
+        self.assertEqual(config.console.vnc.bind_host, "127.0.0.1")
+        self.assertEqual(config.console.vnc.display_number, 77)
+        self.assertEqual(config.console.vnc.viewer, "remote-viewer")
+        self.assertEqual(config.console.vnc.port, 5977)
 
         content = VALID_CONFIG.replace('console_backend = "spice"', 'console_backend = "looking-glass"')
         content = content.replace(
@@ -225,6 +229,7 @@ class ConfigTests(unittest.TestCase):
             artifact_dir = "/run/relayinner-display/console"
 
             [console.vnc]
+            display_number = 77
             """
         )
         with TemporaryDirectory() as temp_dir:
@@ -241,6 +246,47 @@ class ConfigTests(unittest.TestCase):
         ).replace(
             "[console.spice]\nvv_path = \"/run/relayinner-display/console/spice-current.vv\"\n",
             "[console.vnc]\nfoo = 1\n",
+        )
+        with TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "config.toml"
+            config_path.write_text(content, encoding="utf-8")
+
+            with self.assertRaises(ConfigError):
+                load_config(config_path)
+
+    def test_vnc_bind_host_must_be_loopback(self) -> None:
+        content = VALID_CONFIG.replace('console_backend = "spice"', 'console_backend = "vnc"')
+        content = content.replace(
+            "[console.spice]\nvv_path = \"/run/relayinner-display/console/spice-current.vv\"\n",
+            "[console.vnc]\nbind_host = \"0.0.0.0\"\ndisplay_number = 77\n",
+        )
+        with TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "config.toml"
+            config_path.write_text(content, encoding="utf-8")
+
+            with self.assertRaises(ConfigError):
+                load_config(config_path)
+
+    def test_vnc_display_number_must_be_in_range(self) -> None:
+        for display_number in ("-1", "59636"):
+            with self.subTest(display_number=display_number):
+                content = VALID_CONFIG.replace('console_backend = "spice"', 'console_backend = "vnc"')
+                content = content.replace(
+                    "[console.spice]\nvv_path = \"/run/relayinner-display/console/spice-current.vv\"\n",
+                    f"[console.vnc]\ndisplay_number = {display_number}\n",
+                )
+                with TemporaryDirectory() as temp_dir:
+                    config_path = Path(temp_dir) / "config.toml"
+                    config_path.write_text(content, encoding="utf-8")
+
+                    with self.assertRaises(ConfigError):
+                        load_config(config_path)
+
+    def test_vnc_viewer_is_fixed_to_remote_viewer(self) -> None:
+        content = VALID_CONFIG.replace('console_backend = "spice"', 'console_backend = "vnc"')
+        content = content.replace(
+            "[console.spice]\nvv_path = \"/run/relayinner-display/console/spice-current.vv\"\n",
+            "[console.vnc]\ndisplay_number = 77\nviewer = \"vinagre\"\n",
         )
         with TemporaryDirectory() as temp_dir:
             config_path = Path(temp_dir) / "config.toml"

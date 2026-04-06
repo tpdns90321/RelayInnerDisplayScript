@@ -7,6 +7,7 @@ from typing import Any, Callable, Mapping, Sequence
 import json
 import os
 import re
+import shlex
 import socket
 import subprocess
 import tempfile
@@ -16,12 +17,34 @@ class ProxmoxCommandError(RuntimeError):
     """Raised when a local Proxmox CLI command fails or returns invalid data."""
 
 
+class VncConfigurationError(RuntimeError):
+    """Raised when VM config does not match the supported loopback-only VNC contract."""
+
+
+class VncEndpointUnavailableError(RuntimeError):
+    """Raised when a validated VNC endpoint is not reachable yet."""
+
+
 @dataclass(frozen=True)
 class CommandResult:
     args: tuple[str, ...]
     returncode: int
     stdout: str
     stderr: str
+
+
+@dataclass(frozen=True)
+class VncEndpoint:
+    bind_host: str
+    display_number: int
+
+    @property
+    def port(self) -> int:
+        return 5900 + self.display_number
+
+    @property
+    def endpoint(self) -> str:
+        return f"{self.bind_host}:{self.port}"
 
 
 Runner = Callable[[Sequence[str], int], CommandResult]
@@ -105,6 +128,73 @@ class ProxmoxClient:
             command.extend(["--timeout", str(timeout_s)])
         self._run(command)
 
+    def validate_vnc_configuration(
+        self,
+        vmid: int,
+        *,
+        bind_host: str,
+        display_number: int,
+    ) -> VncEndpoint:
+        endpoint = self.read_vnc_endpoint(vmid)
+        if endpoint.bind_host not in {"127.0.0.1", "localhost"}:
+            raise VncConfigurationError(
+                f"VM config exposes VNC on non-loopback bind_host={endpoint.bind_host!r}"
+            )
+        if self._normalize_loopback_host(endpoint.bind_host) != self._normalize_loopback_host(
+            bind_host
+        ):
+            raise VncConfigurationError(
+                "VM config VNC bind_host "
+                f"{endpoint.bind_host!r} does not match relay config bind_host={bind_host!r}"
+            )
+        if endpoint.display_number != display_number:
+            raise VncConfigurationError(
+                "VM config VNC display_number "
+                f"{endpoint.display_number} does not match relay config display_number={display_number}"
+            )
+        return endpoint
+
+    def read_vnc_endpoint(self, vmid: int) -> VncEndpoint:
+        result = self._run(["qm", "config", str(vmid)])
+        args_value: str | None = None
+        for line in result.stdout.splitlines():
+            if not line.startswith("args:"):
+                continue
+            _, _, raw_value = line.partition(":")
+            args_value = raw_value.strip()
+            break
+
+        if not args_value:
+            raise VncConfigurationError(
+                "VM config does not expose a VNC endpoint through `args: -vnc ...`"
+            )
+
+        try:
+            argv = shlex.split(args_value)
+        except ValueError as exc:
+            raise ProxmoxCommandError(f"qm config returned invalid args for VM {vmid}") from exc
+
+        for index, token in enumerate(argv):
+            if token != "-vnc":
+                continue
+            if index + 1 >= len(argv):
+                raise VncConfigurationError("VM config is missing a VNC endpoint after `-vnc`")
+            return self._parse_vnc_endpoint(argv[index + 1])
+
+        raise VncConfigurationError(
+            "VM config does not expose a VNC endpoint through `args: -vnc ...`"
+        )
+
+    def probe_vnc_endpoint(self, bind_host: str, port: int, timeout_s: float = 1.0) -> None:
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as connection:
+                connection.settimeout(timeout_s)
+                connection.connect((bind_host, port))
+        except OSError as exc:
+            raise VncEndpointUnavailableError(
+                f"VNC endpoint {bind_host}:{port} is not reachable yet: {exc}"
+            ) from exc
+
     def request_spice_config(
         self,
         node_name: str,
@@ -169,3 +259,27 @@ class ProxmoxClient:
             temp_path = Path(handle.name)
 
         os.replace(temp_path, path)
+
+    def _parse_vnc_endpoint(self, value: str) -> VncEndpoint:
+        endpoint_value = value.split(",", 1)[0]
+        if ":" not in endpoint_value:
+            raise VncConfigurationError(f"Unsupported VNC endpoint syntax: {value!r}")
+
+        bind_host, display_text = endpoint_value.rsplit(":", 1)
+        if not bind_host:
+            raise VncConfigurationError(f"Unsupported VNC endpoint syntax: {value!r}")
+
+        try:
+            display_number = int(display_text)
+        except ValueError as exc:
+            raise VncConfigurationError(f"Unsupported VNC display number in {value!r}") from exc
+
+        if display_number < 0:
+            raise VncConfigurationError(f"Unsupported VNC display number in {value!r}")
+
+        return VncEndpoint(bind_host=bind_host, display_number=display_number)
+
+    def _normalize_loopback_host(self, host: str) -> str:
+        if host in {"127.0.0.1", "localhost"}:
+            return "127.0.0.1"
+        return host

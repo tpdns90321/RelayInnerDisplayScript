@@ -7,6 +7,8 @@ import tomllib
 
 
 SUPPORTED_CONSOLE_BACKENDS = {"spice", "vnc", "looking-glass"}
+SUPPORTED_VNC_BIND_HOSTS = {"127.0.0.1", "localhost"}
+SUPPORTED_VNC_VIEWERS = {"remote-viewer"}
 SUPPORTED_DPMS_POLICIES = {"vm-power"}
 SUPPORTED_POWER_BUTTON_ACTIONS_WHEN_RUNNING = {"shutdown"}
 SUPPORTED_POWER_BUTTON_ACTIONS_WHEN_STOPPED = {"start"}
@@ -16,6 +18,9 @@ DEFAULT_CONTROL_SOCKET = DEFAULT_RUNTIME_RUN_DIR / "session.sock"
 DEFAULT_CONSOLE_ARTIFACT_DIR = DEFAULT_RUNTIME_RUN_DIR / "console"
 DEFAULT_SPICE_VV_PATH = DEFAULT_CONSOLE_ARTIFACT_DIR / "spice-current.vv"
 DEFAULT_LOG_NAMESPACE = "relayinner-display"
+DEFAULT_VNC_BIND_HOST = "127.0.0.1"
+DEFAULT_VNC_VIEWER = "remote-viewer"
+MAX_VNC_DISPLAY_NUMBER = 65535 - 5900
 
 
 class ConfigError(ValueError):
@@ -76,7 +81,21 @@ class ConsoleSpiceConfig:
 
 @dataclass(frozen=True)
 class ConsoleVncConfig:
-    pass
+    display_number: int
+    bind_host: str = DEFAULT_VNC_BIND_HOST
+    viewer: str = DEFAULT_VNC_VIEWER
+
+    @property
+    def port(self) -> int:
+        return 5900 + self.display_number
+
+    @property
+    def endpoint(self) -> str:
+        return f"{self.bind_host}:{self.port}"
+
+    @property
+    def uri(self) -> str:
+        return f"vnc://{self.endpoint}"
 
 
 @dataclass(frozen=True)
@@ -185,7 +204,11 @@ def parse_config(raw: dict[str, Any]) -> AppConfig:
     runtime_spice_vv_path = (
         legacy_spice_vv_path
         if legacy_spice_vv_path is not None
-        else (console.spice.vv_path if console.spice is not None else console.artifact_dir / "spice-current.vv")
+        else (
+            console.spice.vv_path
+            if console.spice is not None
+            else console.artifact_dir / "spice-current.vv"
+        )
     )
 
     runtime = RuntimeConfig(
@@ -381,7 +404,35 @@ def _parse_console_config(
     if backend == "vnc":
         _require_empty_table(spice_block, backend, "console.spice")
         _require_empty_table(looking_glass_block, backend, "console.looking_glass")
-        return ConsoleConfig(artifact_dir=artifact_dir, vnc=ConsoleVncConfig())
+        _require_only_keys(vnc_block, {"bind_host", "display_number", "viewer"}, "console.vnc")
+
+        bind_host = _optional_non_empty_string(
+            vnc_block,
+            "bind_host",
+            default=DEFAULT_VNC_BIND_HOST,
+        )
+        if bind_host not in SUPPORTED_VNC_BIND_HOSTS:
+            supported = ", ".join(sorted(SUPPORTED_VNC_BIND_HOSTS))
+            raise ConfigError(
+                f"Unsupported console.vnc.bind_host={bind_host!r}; supported values: {supported}"
+            )
+
+        display_number = _require_vnc_display_number(vnc_block, "display_number")
+        viewer = _optional_non_empty_string(vnc_block, "viewer", default=DEFAULT_VNC_VIEWER)
+        if viewer not in SUPPORTED_VNC_VIEWERS:
+            supported = ", ".join(sorted(SUPPORTED_VNC_VIEWERS))
+            raise ConfigError(
+                f"Unsupported console.vnc.viewer={viewer!r}; supported values: {supported}"
+            )
+
+        return ConsoleConfig(
+            artifact_dir=artifact_dir,
+            vnc=ConsoleVncConfig(
+                display_number=display_number,
+                bind_host=bind_host,
+                viewer=viewer,
+            ),
+        )
 
     _require_empty_table(spice_block, backend, "console.spice")
     _require_empty_table(vnc_block, backend, "console.vnc")
@@ -411,6 +462,17 @@ def _optional_absolute_path_or_none(table: dict[str, Any], key: str) -> Path | N
     if key not in table:
         return None
     return _require_absolute_path(table, key)
+
+
+def _require_vnc_display_number(table: dict[str, Any], key: str) -> int:
+    value = table.get(key)
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ConfigError(f"Missing or invalid non-negative integer value for {key!r}")
+    if value > MAX_VNC_DISPLAY_NUMBER:
+        raise ConfigError(
+            f"{key!r} must be <= {MAX_VNC_DISPLAY_NUMBER} so the derived VNC port stays <= 65535"
+        )
+    return value
 
 
 def _require_child_path(root: Path, child: Path, label: str) -> None:

@@ -4,8 +4,15 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import json
 import unittest
+from unittest.mock import patch
 
-from relayinner_display.proxmox import CommandResult, ProxmoxClient, ProxmoxCommandError
+from relayinner_display.proxmox import (
+    CommandResult,
+    ProxmoxClient,
+    ProxmoxCommandError,
+    VncConfigurationError,
+    VncEndpointUnavailableError,
+)
 
 
 class ProxmoxTests(unittest.TestCase):
@@ -119,6 +126,74 @@ class ProxmoxTests(unittest.TestCase):
             commands,
             [["qm", "start", "101"], ["qm", "shutdown", "101", "--timeout", "90"]],
         )
+
+    def test_validate_vnc_configuration_accepts_loopback_args(self) -> None:
+        def runner(command: list[str], timeout_s: int) -> CommandResult:
+            self.assertEqual(command, ["qm", "config", "101"])
+            return CommandResult(
+                args=tuple(command),
+                returncode=0,
+                stdout="name: win11\nargs: -device virtio-balloon -vnc 127.0.0.1:77,password=off\n",
+                stderr="",
+            )
+
+        client = ProxmoxClient(timeout_s=10, runner=runner)
+        endpoint = client.validate_vnc_configuration(
+            101,
+            bind_host="localhost",
+            display_number=77,
+        )
+
+        self.assertEqual(endpoint.bind_host, "127.0.0.1")
+        self.assertEqual(endpoint.display_number, 77)
+        self.assertEqual(endpoint.port, 5977)
+        self.assertEqual(endpoint.endpoint, "127.0.0.1:5977")
+
+    def test_validate_vnc_configuration_rejects_non_loopback_bind(self) -> None:
+        def runner(command: list[str], timeout_s: int) -> CommandResult:
+            return CommandResult(
+                args=tuple(command),
+                returncode=0,
+                stdout="args: -vnc 0.0.0.0:77\n",
+                stderr="",
+            )
+
+        client = ProxmoxClient(timeout_s=10, runner=runner)
+        with self.assertRaises(VncConfigurationError):
+            client.validate_vnc_configuration(101, bind_host="127.0.0.1", display_number=77)
+
+    def test_validate_vnc_configuration_rejects_display_mismatch(self) -> None:
+        def runner(command: list[str], timeout_s: int) -> CommandResult:
+            return CommandResult(
+                args=tuple(command),
+                returncode=0,
+                stdout="args: -vnc 127.0.0.1:78\n",
+                stderr="",
+            )
+
+        client = ProxmoxClient(timeout_s=10, runner=runner)
+        with self.assertRaises(VncConfigurationError):
+            client.validate_vnc_configuration(101, bind_host="127.0.0.1", display_number=77)
+
+    def test_probe_vnc_endpoint_reports_unreachable_socket(self) -> None:
+        client = ProxmoxClient(timeout_s=10, runner=lambda command, timeout_s: None)  # type: ignore[arg-type]
+
+        class FailingSocket:
+            def __enter__(self) -> "FailingSocket":
+                return self
+
+            def __exit__(self, exc_type, exc, tb) -> None:
+                return None
+
+            def settimeout(self, timeout_s: float) -> None:
+                return None
+
+            def connect(self, address: tuple[str, int]) -> None:
+                raise ConnectionRefusedError("refused")
+
+        with patch("relayinner_display.proxmox.socket.socket", return_value=FailingSocket()):
+            with self.assertRaises(VncEndpointUnavailableError):
+                client.probe_vnc_endpoint("127.0.0.1", 5977)
 
 
 if __name__ == "__main__":

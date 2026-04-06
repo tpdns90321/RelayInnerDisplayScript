@@ -16,7 +16,12 @@ from .config import AppConfig, ConfigError, build_fallback_config, load_config
 from .input import EvdevPowerButtonSource, LogindPowerButtonPolicyChecker, PowerButtonError
 from .ipc import decode_message, encode_message, validate_session_message
 from .models import RuntimeState, SessionState, write_runtime_state
-from .proxmox import ProxmoxClient, ProxmoxCommandError
+from .proxmox import (
+    ProxmoxClient,
+    ProxmoxCommandError,
+    VncConfigurationError,
+    VncEndpointUnavailableError,
+)
 
 
 DEFAULT_CONFIG_PATH = Path("/etc/relayinner-display/config.toml")
@@ -33,7 +38,7 @@ CONSOLE_LAUNCHERS = {
     "vnc": "remote-viewer",
     "looking-glass": "looking-glass-client",
 }
-IMPLEMENTED_CONSOLE_BACKENDS = {"spice"}
+IMPLEMENTED_CONSOLE_BACKENDS = {"spice", "vnc"}
 REQUIRED_DAEMON_BINARIES: tuple[str, ...] = ()
 
 
@@ -164,6 +169,7 @@ class DisplayDaemon:
             vmid=config.target.vmid,
             node_name="",
             console_backend=config.target.console_backend,
+            vnc_endpoint=config.console.vnc.endpoint if config.console.vnc is not None else None,
         )
         self.session_ready = False
         self.console_running = False
@@ -401,6 +407,18 @@ class DisplayDaemon:
         try:
             self._transition(SessionState.REQUESTING_CONSOLE)
             connect_message = self._prepare_console_launch()
+        except VncEndpointUnavailableError as exc:
+            self.state.last_error = str(exc)
+            self._schedule_reconnect(timestamp)
+            self._transition(SessionState.RECONNECTING_CONSOLE)
+            self._persist_state()
+            self.console_logger.warning("%s", exc)
+            return actions + display_actions + [{"type": "show_waiting", "reason": "reconnecting"}]
+        except VncConfigurationError as exc:
+            return actions + display_actions + self._enter_degraded(
+                f"Console preparation failed for backend={backend}: {exc}",
+                subsystem="console",
+            )
         except ProxmoxCommandError as exc:
             return actions + display_actions + self._record_proxmox_failure(timestamp, str(exc))
 
@@ -663,28 +681,52 @@ class DisplayDaemon:
 
     def _prepare_console_launch(self) -> dict[str, object]:
         backend = self.config.target.console_backend
-        if backend != "spice":
-            raise AssertionError(f"Unhandled console backend: {backend}")
+        if backend == "spice":
+            spice_vv_path = self._spice_vv_path()
+            spice_config = self.proxmox.request_spice_config(
+                self.state.node_name,
+                self.config.target.vmid,
+            )
+            self.proxmox.write_vv_file(spice_vv_path, spice_config)
+            os.chmod(spice_vv_path, 0o640)
+            chown_if_present(
+                spice_vv_path,
+                SESSION_USER,
+                SESSION_GROUP,
+                self.logger,
+            )
+            return {
+                "type": "connect_console",
+                "backend": backend,
+                "launcher": CONSOLE_LAUNCHERS[backend],
+                "argv": [CONSOLE_LAUNCHERS[backend], "--full-screen", str(spice_vv_path)],
+            }
 
-        spice_vv_path = self._spice_vv_path()
-        spice_config = self.proxmox.request_spice_config(
-            self.state.node_name,
-            self.config.target.vmid,
-        )
-        self.proxmox.write_vv_file(spice_vv_path, spice_config)
-        os.chmod(spice_vv_path, 0o640)
-        chown_if_present(
-            spice_vv_path,
-            SESSION_USER,
-            SESSION_GROUP,
-            self.logger,
-        )
-        return {
-            "type": "connect_console",
-            "backend": backend,
-            "launcher": CONSOLE_LAUNCHERS[backend],
-            "argv": [CONSOLE_LAUNCHERS[backend], "--full-screen", str(spice_vv_path)],
-        }
+        if backend == "vnc":
+            vnc = self.config.console.vnc
+            if vnc is None:
+                raise AssertionError("VNC backend selected without console.vnc config")
+
+            self.proxmox.validate_vnc_configuration(
+                self.config.target.vmid,
+                bind_host=vnc.bind_host,
+                display_number=vnc.display_number,
+            )
+            self.proxmox.probe_vnc_endpoint(vnc.bind_host, vnc.port)
+            self.state.vnc_endpoint = vnc.endpoint
+            self.console_logger.info(
+                "Validated VNC endpoint for VM %s at %s",
+                self.state.vmid,
+                self.state.vnc_endpoint,
+            )
+            return {
+                "type": "connect_console",
+                "backend": backend,
+                "launcher": vnc.viewer,
+                "argv": [vnc.viewer, "--full-screen", vnc.uri],
+            }
+
+        raise AssertionError(f"Unhandled console backend: {backend}")
 
     def _validate_runtime_dependencies(self) -> None:
         required = [*REQUIRED_DAEMON_BINARIES, self.config.display.power_helper]

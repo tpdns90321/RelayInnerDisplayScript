@@ -21,17 +21,34 @@ from relayinner_display.config import (
 from relayinner_display.daemon import DisplayDaemon
 from relayinner_display.input import PowerButtonError
 from relayinner_display.models import SessionState
-from relayinner_display.proxmox import ProxmoxCommandError
+from relayinner_display.proxmox import (
+    ProxmoxCommandError,
+    VncConfigurationError,
+    VncEndpoint,
+    VncEndpointUnavailableError,
+)
 
 
 class FakeProxmoxClient:
-    def __init__(self, statuses: list[str]) -> None:
+    def __init__(
+        self,
+        statuses: list[str],
+        *,
+        vnc_validation_error: Exception | None = None,
+        vnc_probe_error: Exception | None = None,
+        vnc_endpoint: VncEndpoint | None = None,
+    ) -> None:
         self.statuses = statuses
         self.status_index = 0
         self.request_spice_calls: list[tuple[str, int]] = []
         self.write_calls: list[Path] = []
         self.start_calls: list[int] = []
         self.shutdown_calls: list[tuple[int, int]] = []
+        self.validate_vnc_calls: list[tuple[int, str, int]] = []
+        self.probe_vnc_calls: list[tuple[str, int, float]] = []
+        self.vnc_validation_error = vnc_validation_error
+        self.vnc_probe_error = vnc_probe_error
+        self.vnc_endpoint = vnc_endpoint
 
     def resolve_node_name(self, configured_name: str) -> str:
         return "pve-01"
@@ -56,6 +73,23 @@ class FakeProxmoxClient:
 
     def shutdown_vm(self, vmid: int, timeout_s: int) -> None:
         self.shutdown_calls.append((vmid, timeout_s))
+
+    def validate_vnc_configuration(
+        self,
+        vmid: int,
+        *,
+        bind_host: str,
+        display_number: int,
+    ) -> VncEndpoint:
+        self.validate_vnc_calls.append((vmid, bind_host, display_number))
+        if self.vnc_validation_error is not None:
+            raise self.vnc_validation_error
+        return self.vnc_endpoint or VncEndpoint(bind_host=bind_host, display_number=display_number)
+
+    def probe_vnc_endpoint(self, bind_host: str, port: int, timeout_s: float = 1.0) -> None:
+        self.probe_vnc_calls.append((bind_host, port, timeout_s))
+        if self.vnc_probe_error is not None:
+            raise self.vnc_probe_error
 
 
 class FailingProxmoxClient(FakeProxmoxClient):
@@ -211,6 +245,71 @@ class DisplayDaemonTests(unittest.TestCase):
         self.assertTrue(daemon.console_running)
         self.assertEqual(daemon.state.display_power_intent, "on")
         self.assertEqual(daemon.state.session_state, SessionState.SHOWING_CONSOLE)
+
+    def test_running_vm_connects_and_reconnects_after_vnc_viewer_exit(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            config = build_config(Path(temp_dir), backend="vnc")
+            proxmox = FakeProxmoxClient(["running", "running"])
+            daemon = DisplayDaemon(config=config, proxmox=proxmox)
+            start_time = datetime(2026, 4, 4, 0, 0, tzinfo=timezone.utc)
+
+            daemon.prepare_runtime()
+            daemon.start(now=start_time)
+
+            ready_actions = daemon.handle_session_message({"type": "session_ready"}, now=start_time)
+            self.assertEqual(
+                ready_actions,
+                [
+                    {"type": "display_power", "state": "on", "output": ""},
+                    {"type": "show_waiting", "reason": "connecting"},
+                ],
+            )
+
+            tick_actions = daemon.tick(now=start_time)
+            self.assertEqual(
+                tick_actions,
+                [
+                    {
+                        "type": "connect_console",
+                        "backend": "vnc",
+                        "launcher": "remote-viewer",
+                        "argv": [
+                            "remote-viewer",
+                            "--full-screen",
+                            "vnc://127.0.0.1:5977",
+                        ],
+                    }
+                ],
+            )
+            self.assertEqual(proxmox.validate_vnc_calls, [(101, "127.0.0.1", 77)])
+            self.assertEqual(proxmox.probe_vnc_calls, [("127.0.0.1", 5977, 1.0)])
+
+            daemon.handle_session_message(
+                {"type": "console_started", "backend": "vnc", "pid": 4321},
+                now=start_time,
+            )
+            exit_actions = daemon.handle_session_message(
+                {"type": "console_exited", "backend": "vnc", "code": 1, "signal": 0},
+                now=start_time,
+            )
+
+            self.assertEqual(exit_actions, [{"type": "show_waiting", "reason": "reconnecting"}])
+            reconnect_tick = daemon.tick(now=start_time + timedelta(milliseconds=1000))
+            self.assertEqual(
+                reconnect_tick,
+                [
+                    {
+                        "type": "connect_console",
+                        "backend": "vnc",
+                        "launcher": "remote-viewer",
+                        "argv": [
+                            "remote-viewer",
+                            "--full-screen",
+                            "vnc://127.0.0.1:5977",
+                        ],
+                    }
+                ],
+            )
 
     def test_initial_off_state_waits_before_sleeping(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -582,9 +681,63 @@ class DisplayDaemonTests(unittest.TestCase):
         self.assertEqual(daemon.state.session_state, SessionState.DEGRADED)
         self.assertEqual(daemon.state.degraded_reason, "Missing required binary: remote-viewer")
 
-    def test_unimplemented_console_backend_enters_degraded_with_backend_name(self) -> None:
+    def test_vnc_endpoint_not_yet_reachable_enters_reconnect_flow(self) -> None:
         with TemporaryDirectory() as temp_dir:
             config = build_config(Path(temp_dir), backend="vnc")
+            daemon = DisplayDaemon(
+                config=config,
+                proxmox=FakeProxmoxClient(
+                    ["running"],
+                    vnc_probe_error=VncEndpointUnavailableError(
+                        "VNC endpoint 127.0.0.1:5977 is not reachable yet: refused"
+                    ),
+                ),
+            )
+            start_time = datetime(2026, 4, 4, 0, 0, tzinfo=timezone.utc)
+
+            daemon.prepare_runtime()
+            daemon.start(now=start_time)
+            daemon.handle_session_message({"type": "session_ready"}, now=start_time)
+            actions = daemon.tick(now=start_time)
+
+        self.assertEqual(actions, [{"type": "show_waiting", "reason": "reconnecting"}])
+        self.assertEqual(daemon.state.session_state, SessionState.RECONNECTING_CONSOLE)
+        self.assertIsNone(daemon.state.degraded_reason)
+        self.assertEqual(
+            daemon.state.last_error,
+            "VNC endpoint 127.0.0.1:5977 is not reachable yet: refused",
+        )
+
+    def test_vnc_config_mismatch_enters_degraded_with_clear_reason(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            config = build_config(Path(temp_dir), backend="vnc")
+            daemon = DisplayDaemon(
+                config=config,
+                proxmox=FakeProxmoxClient(
+                    ["running"],
+                    vnc_validation_error=VncConfigurationError(
+                        "VM config exposes VNC on non-loopback bind_host='0.0.0.0'"
+                    ),
+                ),
+            )
+            start_time = datetime(2026, 4, 4, 0, 0, tzinfo=timezone.utc)
+
+            daemon.prepare_runtime()
+            daemon.start(now=start_time)
+            daemon.handle_session_message({"type": "session_ready"}, now=start_time)
+            actions = daemon.tick(now=start_time)
+
+        self.assertEqual(actions, [{"type": "show_waiting", "reason": "degraded"}])
+        self.assertEqual(daemon.state.session_state, SessionState.DEGRADED)
+        self.assertEqual(
+            daemon.state.degraded_reason,
+            "Console preparation failed for backend=vnc: "
+            "VM config exposes VNC on non-loopback bind_host='0.0.0.0'",
+        )
+
+    def test_unimplemented_console_backend_enters_degraded_with_backend_name(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            config = build_config(Path(temp_dir), backend="looking-glass")
             daemon = DisplayDaemon(config=config, proxmox=FakeProxmoxClient(["running"]))
             start_time = datetime(2026, 4, 4, 0, 0, tzinfo=timezone.utc)
 
@@ -597,7 +750,7 @@ class DisplayDaemonTests(unittest.TestCase):
         self.assertEqual(daemon.state.session_state, SessionState.DEGRADED)
         self.assertEqual(
             daemon.state.degraded_reason,
-            "Console preparation failed for backend=vnc: not implemented",
+            "Console preparation failed for backend=looking-glass: not implemented",
         )
 
     def test_repeated_proxmox_failures_enter_degraded_after_retry_budget(self) -> None:
@@ -643,6 +796,7 @@ class DisplayDaemonTests(unittest.TestCase):
         self.assertEqual(payload["appliance_state"], "reconnecting_console")
         self.assertEqual(payload["console_backend"], "spice")
         self.assertIsNone(payload["active_console_backend"])
+        self.assertIsNone(payload["vnc_endpoint"])
         self.assertTrue(payload["session_ready"])
         self.assertEqual(payload["vm_power_state"], "running")
         self.assertEqual(payload["display_power_applied"], "on")
@@ -651,11 +805,28 @@ class DisplayDaemonTests(unittest.TestCase):
         self.assertEqual(payload["last_console_exit"]["code"], 1)
         self.assertEqual(payload["last_console_exit"]["signal"], 0)
 
+    def test_state_file_includes_vnc_endpoint_for_vnc_backend(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            config = build_config(Path(temp_dir), backend="vnc")
+            daemon = DisplayDaemon(config=config, proxmox=FakeProxmoxClient(["stopped"]))
+            start_time = datetime(2026, 4, 4, 0, 0, tzinfo=timezone.utc)
+
+            daemon.prepare_runtime()
+            daemon.start(now=start_time)
+
+            payload = json.loads(config.runtime.daemon_state_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(payload["console_backend"], "vnc")
+        self.assertEqual(payload["vnc_endpoint"], "127.0.0.1:5977")
+
 
 def build_config(
     root: Path,
     *,
     backend: str = "spice",
+    vnc_bind_host: str = "127.0.0.1",
+    vnc_display_number: int = 77,
+    vnc_viewer: str = "remote-viewer",
     output_name: str = "",
     power_helper: str = "wlr-randr",
     dpms_off_delay_ms: int = 5000,
@@ -669,7 +840,13 @@ def build_config(
         spice=ConsoleSpiceConfig(vv_path=run_dir / "console" / "spice-current.vv")
         if backend == "spice"
         else None,
-        vnc=ConsoleVncConfig() if backend == "vnc" else None,
+        vnc=ConsoleVncConfig(
+            display_number=vnc_display_number,
+            bind_host=vnc_bind_host,
+            viewer=vnc_viewer,
+        )
+        if backend == "vnc"
+        else None,
         looking_glass=ConsoleLookingGlassConfig() if backend == "looking-glass" else None,
     )
     return AppConfig(
