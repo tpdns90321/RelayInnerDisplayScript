@@ -6,7 +6,7 @@ The target outcome is a small appliance-like runtime that takes one VM managed b
 
 ## Status
 
-This repository now includes Specs 10 through 17 of the MVP plan.
+This repository now includes Specs 10 through 17 of the current MVP plan plus Specs 20 through 22 for the next console-backend expansion series.
 
 - The MVP architecture and behavior are defined in `./specs`.
 - Spec 10 now has a Python implementation for config loading, daemon/session IPC, local Proxmox command wrappers, SPICE `.vv` generation, and reconnect state handling.
@@ -17,6 +17,7 @@ This repository now includes Specs 10 through 17 of the MVP plan.
 - Spec 15 now hardens the appliance integration layer with the final MVP state-file contract, runtime dependency validation, repeated Proxmox-failure degradation, subsystem-scoped journald logging, and systemd restart-loop thresholds.
 - Spec 16 now turns the root README into the first-run install entrypoint and persists `/var/lib/relayinner-display/install-state.json` so later uninstall or upgrade work can see what the installer changed.
 - Spec 17 now adds a root-owned `uninstall.sh`, install-state-aware host restoration, default config preservation, and an explicit purge path for full relay cleanup.
+- Specs 20 through 22 now define the post-MVP console-backend expansion so operators can later choose SPICE, VNC, or Looking Glass from config; the current implementation remains SPICE-only.
 - The current design still assumes direct installation on a Proxmox host, not an LXC container.
 
 ## Quickstart
@@ -138,6 +139,9 @@ Operationally, the appliance is expected to move through a small state machine:
 - [Spec 15: MVP Integration, Failure Policy, and Ops](./specs/15-mvp-integration-failure-policy-and-ops.md)
 - [Spec 16: Proxmox Host Installation Flow and README Quickstart](./specs/16-proxmox-host-installation-flow-and-readme-quickstart.md)
 - [Spec 17: Safe Uninstall Flow and README Removal Guide](./specs/17-safe-uninstall-flow-and-readme-removal-guide.md)
+- [Spec 20: Configurable Console Backend Contract](./specs/20-configurable-console-backend-contract.md)
+- [Spec 21: Proxmox Local VNC Backend](./specs/21-proxmox-local-vnc-backend.md)
+- [Spec 22: Looking Glass Backend and Preflight](./specs/22-looking-glass-backend-and-preflight.md)
 
 Recommended implementation order:
 
@@ -148,6 +152,14 @@ Recommended implementation order:
 5. Spec 15
 6. Spec 16
 7. Spec 17
+8. Spec 20
+9. Spec 21 and Spec 22
+
+Console-backend expansion plan:
+
+- Wave 1: Implement Spec 20 first and keep the existing SPICE path passing on the new generic console contract.
+- Wave 2: After Spec 20 lands, implement Spec 21 and Spec 22 in parallel.
+- Parallel split: Spec 21 owns VNC-specific config, daemon preparation, and tests; Spec 22 owns Looking Glass preflight, launch wiring, and tests.
 
 ## Expected Host Dependencies
 
@@ -192,7 +204,7 @@ The current implementation now manages:
 - `docs/` holds operator-facing setup documentation for the host-direct install path.
 - `install.sh` is the idempotent host bootstrap entrypoint from Specs 14 and 16.
 - `uninstall.sh` is the safe removal entrypoint from Spec 17.
-- `specs/` holds the MVP specification set.
+- `specs/` holds the MVP specification set plus the next console-backend expansion specs.
 - `tests/` holds unit tests for the current runtime slice.
 - `tasks/` is reserved for task/worktree-oriented workflow.
 

@@ -1,6 +1,6 @@
 # RelayInnerDisplayScript Specs
 
-This directory contains the MVP spec set for a Proxmox-hosted display relay appliance that mirrors one KVM guest directly onto a host-attached monitor.
+This directory contains the current MVP spec set plus the next console-backend expansion series for a Proxmox-hosted display relay appliance that mirrors one KVM guest directly onto a host-attached monitor.
 
 ## Spec Index
 
@@ -12,22 +12,26 @@ This directory contains the MVP spec set for a Proxmox-hosted display relay appl
 - `15-mvp-integration-failure-policy-and-ops.md`
 - `16-proxmox-host-installation-flow-and-readme-quickstart.md`
 - `17-safe-uninstall-flow-and-readme-removal-guide.md`
+- `20-configurable-console-backend-contract.md`
+- `21-proxmox-local-vnc-backend.md`
+- `22-looking-glass-backend-and-preflight.md`
 
 ## Product Summary
 
 RelayInnerDisplayScript turns a Proxmox host with an attached monitor into a single-purpose guest display relay:
 
 - It boots directly into a Cage kiosk session.
-- It shows one target VM on the attached display using SPICE and `remote-viewer`.
+- It shows one target VM on the attached display using SPICE and `remote-viewer` today.
 - It wakes or sleeps the host monitor based on the VM power state.
 - It forwards the physical host power button to guest start or shutdown behavior.
 - It installs directly on the Proxmox host for the MVP rather than inside an LXC container.
+- Specs 20 through 22 define the next expansion step so operators can later choose SPICE, VNC, or Looking Glass from config.
 
 ## Shared Defaults
 
 - Deployment target: Proxmox host direct install
 - Runtime model: Python scripts plus systemd units
-- Console backend: SPICE via `remote-viewer`
+- Console backend: SPICE via `remote-viewer` by default
 - Proxmox control path: local `qm` and `pvesh`
 - Display policy: monitor on when VM is active, monitor standby when VM is off
 - Power button policy: start when VM is off, graceful shutdown when VM is on
@@ -41,3 +45,32 @@ RelayInnerDisplayScript turns a Proxmox host with an attached monitor into a sin
 5. Spec 15
 6. Spec 16
 7. Spec 17
+8. Spec 20
+9. Spec 21 and Spec 22
+
+## Expansion Plan
+
+Recommended implementation waves for the console-backend expansion:
+
+- Wave 1: Finish Spec 20 and keep the SPICE path green on the new generic contract.
+- Wave 2: Implement Spec 21 and Spec 22 in parallel on top of the completed Spec 20 contract.
+
+Parallelization rule:
+
+- Do not start parallel work until Spec 20 has finished the shared config model, generic `connect_console` IPC, backend-neutral session launch path, and SPICE regression coverage.
+- After that point, Spec 21 should own VNC-specific daemon/config/test work while Spec 22 should own Looking Glass preflight/launch/test work.
+
+```mermaid
+flowchart LR
+    subgraph Wave_1["Wave 1"]
+        S20["Spec 20\nConfigurable Console Backend Contract"]
+    end
+
+    subgraph Wave_2["Wave 2 (Parallel)"]
+        S21["Spec 21\nProxmox Local VNC Backend"]
+        S22["Spec 22\nLooking Glass Backend and Preflight"]
+    end
+
+    S20 --> S21
+    S20 --> S22
+```
