@@ -6,7 +6,7 @@ The target outcome is a small appliance-like runtime that takes one VM managed b
 
 ## Status
 
-This repository now includes Specs 10 through 17 of the current MVP plan plus Specs 20 through 22 for the next console-backend expansion series.
+This repository now includes Specs 10 through 17 of the current MVP plan, Specs 20 through 22 for the implemented console-backend expansion series, and Specs 30 through 32 for the next planned Moonlight client series.
 
 - The MVP architecture and behavior are defined in `./specs`.
 - Spec 10 now has a Python implementation for config loading, daemon/session IPC, local Proxmox command wrappers, SPICE `.vv` generation, and reconnect state handling.
@@ -20,6 +20,7 @@ This repository now includes Specs 10 through 17 of the current MVP plan plus Sp
 - Spec 20 now generalizes the shared config, runtime artifact layout, IPC, session launch path, and runtime state around a backend-neutral console contract while keeping existing SPICE behavior intact.
 - Spec 21 now implements the loopback-only Proxmox VNC backend, including config validation, `qm config` matching, endpoint probing, runtime `vnc_endpoint` state, and `remote-viewer` URI launch.
 - Spec 22 now implements the preflight-only Looking Glass backend, including config validation, shared-memory preflight, runtime `looking_glass_shm_file` state, and fullscreen `looking-glass-client` launch wiring.
+- Specs 30 through 32 now define the next Moonlight client series for Sunshine-backed guests: backend contract, persistent pair-assist workspace, and runtime launch/recovery behavior.
 - The current design still assumes direct installation on a Proxmox host, not an LXC container.
 
 ## Quickstart
@@ -151,6 +152,9 @@ Operationally, the appliance is expected to move through a small state machine:
 - [Spec 20: Configurable Console Backend Contract](./specs/20-configurable-console-backend-contract.md)
 - [Spec 21: Proxmox Local VNC Backend](./specs/21-proxmox-local-vnc-backend.md)
 - [Spec 22: Looking Glass Backend and Preflight](./specs/22-looking-glass-backend-and-preflight.md)
+- [Spec 30: Moonlight Backend Contract and Config](./specs/30-moonlight-backend-contract-and-config.md)
+- [Spec 31: Moonlight Pair-Assist and Persistent Workspace](./specs/31-moonlight-pair-assist-and-persistent-workspace.md)
+- [Spec 32: Moonlight Stream Launch, Recovery, and Ops](./specs/32-moonlight-stream-launch-recovery-and-ops.md)
 
 Recommended implementation order:
 
@@ -163,11 +167,15 @@ Recommended implementation order:
 7. Spec 17
 8. Spec 20
 9. Spec 21 and Spec 22
+10. Spec 30
+11. Spec 31
+12. Spec 32
 
 Console-backend expansion status:
 
 - Wave 1 is complete: Spec 20 generalized the shared console contract without regressing SPICE.
 - Wave 2 is complete: Spec 21 now owns the shipped VNC path, and Spec 22 now ships the preflight-only Looking Glass path on the same shared contract.
+- Wave 3 is now specified: Specs 30 through 32 define the planned Moonlight client path for Sunshine-backed guests, but that series is not implemented yet.
 
 ## Expected Host Dependencies
 

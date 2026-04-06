@@ -1,6 +1,6 @@
 # RelayInnerDisplayScript Specs
 
-This directory contains the current MVP spec set plus the next console-backend expansion series for a Proxmox-hosted display relay appliance that mirrors one KVM guest directly onto a host-attached monitor.
+This directory contains the current MVP spec set, the implemented console-backend expansion series, and the next planned Moonlight client series for a Proxmox-hosted display relay appliance that mirrors one KVM guest directly onto a host-attached monitor.
 
 ## Spec Index
 
@@ -15,6 +15,9 @@ This directory contains the current MVP spec set plus the next console-backend e
 - `20-configurable-console-backend-contract.md`
 - `21-proxmox-local-vnc-backend.md`
 - `22-looking-glass-backend-and-preflight.md`
+- `30-moonlight-backend-contract-and-config.md`
+- `31-moonlight-pair-assist-and-persistent-workspace.md`
+- `32-moonlight-stream-launch-recovery-and-ops.md`
 
 ## Product Summary
 
@@ -25,7 +28,8 @@ RelayInnerDisplayScript turns a Proxmox host with an attached monitor into a sin
 - It wakes or sleeps the host monitor based on the VM power state.
 - It forwards the physical host power button to guest start or shutdown behavior.
 - It installs directly on the Proxmox host for the MVP rather than inside an LXC container.
-- Specs 20 through 22 define the current expansion step so operators can choose SPICE or VNC from config today, with Looking Glass planned next.
+- Specs 20 through 22 define the current implemented backend expansion so operators can choose SPICE, VNC, or Looking Glass from config today.
+- Specs 30 through 32 define the next planned Moonlight client series for Sunshine-backed guests.
 
 ## Shared Defaults
 
@@ -47,18 +51,24 @@ RelayInnerDisplayScript turns a Proxmox host with an attached monitor into a sin
 7. Spec 17
 8. Spec 20
 9. Spec 21 and Spec 22
+10. Spec 30
+11. Spec 31
+12. Spec 32
 
 ## Expansion Plan
 
 Current implementation waves for the console-backend expansion:
 
 - Wave 1: Finish Spec 20 and keep the SPICE path green on the new generic contract.
-- Wave 2: Spec 21 is now implemented on top of the completed Spec 20 contract; Spec 22 remains pending.
+- Wave 2: Spec 21 and Spec 22 are now implemented on top of the completed Spec 20 contract.
+- Wave 3: Specs 30 through 32 define the planned Moonlight client path for Sunshine-backed guests.
 
 Parallelization rule:
 
 - Do not start parallel work until Spec 20 has finished the shared config model, generic `connect_console` IPC, backend-neutral session launch path, and SPICE regression coverage.
 - After that point, Spec 21 owns VNC-specific daemon/config/test work while Spec 22 owns Looking Glass preflight/launch/test work.
+- Do not start the Moonlight implementation series until Spec 30 has defined the backend contract, working-directory launch support, and documentation baseline.
+- After that point, Spec 31 owns the persistent workspace and pair-assist flow, and Spec 32 owns runtime launch, reconnect, and operator docs.
 
 ```mermaid
 flowchart LR
@@ -71,6 +81,15 @@ flowchart LR
         S22["Spec 22\nLooking Glass Backend and Preflight"]
     end
 
+    subgraph Wave_3["Wave 3"]
+        S30["Spec 30\nMoonlight Backend Contract and Config"]
+        S31["Spec 31\nMoonlight Pair-Assist and Persistent Workspace"]
+        S32["Spec 32\nMoonlight Stream Launch, Recovery, and Ops"]
+    end
+
     S20 --> S21
     S20 --> S22
+    S20 --> S30
+    S30 --> S31
+    S31 --> S32
 ```
