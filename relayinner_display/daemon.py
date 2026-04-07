@@ -416,7 +416,6 @@ class DisplayDaemon:
                 backend == "moonlight"
                 and self.state.moonlight_pair_state is MoonlightPairState.PENDING_PIN_APPROVAL
             ):
-                self.moonlight_pair_launch_pending = False
                 self.next_reconnect_at = None
                 self.state.last_error = None
                 self._transition(SessionState.WAITING_FOR_PAIRING)
@@ -426,7 +425,7 @@ class DisplayDaemon:
                     exit_code,
                     exit_signal,
                 )
-                return []
+                return [self._moonlight_pair_waiting_message()]
             self.state.last_error = (
                 f"Console backend={backend} exited unexpectedly (code={exit_code}, signal={exit_signal})"
             )
@@ -490,17 +489,29 @@ class DisplayDaemon:
             self._persist_state()
             return actions + display_actions
 
+        pairing_console_ready_to_stream = False
         if self.console_running:
-            self.state.last_error = None
             if (
                 self.state.active_console_backend == "moonlight"
                 and self.state.moonlight_pair_state is MoonlightPairState.PENDING_PIN_APPROVAL
             ):
-                self._transition(SessionState.WAITING_FOR_PAIRING)
+                try:
+                    pairing_blocked, pairing_actions = self._handle_moonlight_pairing(timestamp)
+                except RuntimeValidationError as exc:
+                    return actions + display_actions + self._enter_degraded(
+                        "Console preparation failed for backend=moonlight: "
+                        f"{exc}",
+                        subsystem="console",
+                    )
+                if pairing_blocked:
+                    self._persist_state()
+                    return actions + display_actions + pairing_actions
+                pairing_console_ready_to_stream = True
             else:
+                self.state.last_error = None
                 self._transition(SessionState.SHOWING_CONSOLE)
-            self._persist_state()
-            return actions + display_actions
+                self._persist_state()
+                return actions + display_actions
 
         if self.next_reconnect_at is not None and timestamp < self.next_reconnect_at:
             self._transition(SessionState.RECONNECTING_CONSOLE)
@@ -508,7 +519,7 @@ class DisplayDaemon:
             return actions + display_actions
 
         backend = self.config.target.console_backend
-        if backend == "moonlight":
+        if backend == "moonlight" and not pairing_console_ready_to_stream:
             try:
                 pairing_blocked, pairing_actions = self._handle_moonlight_pairing(timestamp)
             except RuntimeValidationError as exc:
