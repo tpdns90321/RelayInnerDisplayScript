@@ -267,6 +267,10 @@ class DisplayDaemon:
         self.config.runtime.run_dir.mkdir(parents=True, exist_ok=True)
         os.chmod(self.config.runtime.run_dir, 0o750)
         chown_if_present(self.config.runtime.run_dir, SESSION_USER, SESSION_GROUP, self.logger)
+        session_runtime_dir = self._session_runtime_dir()
+        session_runtime_dir.mkdir(parents=True, exist_ok=True)
+        os.chmod(session_runtime_dir, 0o700)
+        chown_if_present(session_runtime_dir, SESSION_USER, SESSION_GROUP, self.logger)
         self.config.console.artifact_dir.mkdir(parents=True, exist_ok=True)
         os.chmod(self.config.console.artifact_dir, 0o750)
         chown_if_present(self.config.console.artifact_dir, SESSION_USER, SESSION_GROUP, self.logger)
@@ -967,6 +971,7 @@ class DisplayDaemon:
             return self.command_runner(
                 command,
                 cwd=str(moonlight.state_dir),
+                env=self._session_user_command_env(),
                 text=True,
                 capture_output=True,
                 check=False,
@@ -995,6 +1000,29 @@ class DisplayDaemon:
             "group": session_entry.pw_gid,
             "extra_groups": extra_groups,
         }
+
+    def _session_user_command_env(self) -> dict[str, str]:
+        env = dict(os.environ)
+        env.setdefault("PATH", os.defpath)
+        env["XDG_SESSION_TYPE"] = "wayland"
+
+        if os.geteuid() != 0:
+            env.setdefault("XDG_RUNTIME_DIR", str(self._session_runtime_dir()))
+            return env
+
+        try:
+            session_entry = pwd.getpwnam(SESSION_USER)
+        except KeyError as exc:
+            raise RuntimeValidationError(f"Session user does not exist: {SESSION_USER}") from exc
+
+        env["HOME"] = session_entry.pw_dir
+        env["LOGNAME"] = session_entry.pw_name
+        env["USER"] = session_entry.pw_name
+        env["XDG_RUNTIME_DIR"] = str(self._session_runtime_dir())
+        return env
+
+    def _session_runtime_dir(self) -> Path:
+        return self.config.runtime.run_dir / "user-runtime"
 
     def _probe_tcp_connectivity(self, host: str, port: int, timeout_s: float) -> None:
         connection = socket.create_connection((host, port), timeout=timeout_s)

@@ -454,8 +454,94 @@ class DisplayDaemonTests(unittest.TestCase):
             daemon.prepare_runtime()
             self.assertTrue(state_dir.is_dir())
             self.assertTrue((state_dir / "portable.dat").is_file())
+            self.assertTrue((config.runtime.run_dir / "user-runtime").is_dir())
             self.assertEqual(state_dir.stat().st_mode & 0o777, 0o700)
             self.assertEqual((state_dir / "portable.dat").stat().st_mode & 0o777, 0o600)
+            self.assertEqual((config.runtime.run_dir / "user-runtime").stat().st_mode & 0o777, 0o700)
+
+    def test_running_vm_detects_paired_moonlight_workspace_with_session_environment(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            state_dir = Path(temp_dir) / "moonlight-state"
+            config = build_config(
+                Path(temp_dir),
+                backend="moonlight",
+                moonlight_state_dir=state_dir,
+            )
+            captured_env: dict[str, str] | None = None
+
+            def fake_command_runner(
+                command: list[str],
+                cwd: str | None = None,
+                env: dict[str, str] | None = None,
+                text: bool = True,
+                capture_output: bool = True,
+                check: bool = False,
+                **_: object,
+            ) -> SimpleNamespace:
+                nonlocal captured_env
+                if command == ["/usr/bin/moonlight", "--version"]:
+                    return SimpleNamespace(returncode=0, stdout="Moonlight 6.1.0\n", stderr="")
+                if command == ["/usr/bin/moonlight", "list", "192.168.50.20", "--csv"]:
+                    captured_env = env
+                    return SimpleNamespace(
+                        returncode=0,
+                        stdout=moonlight_app_list_csv("Desktop"),
+                        stderr="",
+                    )
+                raise AssertionError(f"Unexpected Moonlight command: {command}")
+
+            daemon = DisplayDaemon(
+                config=config,
+                proxmox=FakeProxmoxClient(["running"]),
+                dependency_finder=lambda name: f"/usr/bin/{Path(name).name}",
+                command_runner=fake_command_runner,
+                tcp_connect_probe=lambda host, port, timeout_s: None,
+            )
+            start_time = datetime(2026, 4, 7, 0, 0, tzinfo=timezone.utc)
+
+            with patch("relayinner_display.daemon.os.geteuid", return_value=0), patch(
+                "relayinner_display.daemon.pwd.getpwnam",
+                return_value=SimpleNamespace(
+                    pw_name="relayinner-display",
+                    pw_uid=1001,
+                    pw_gid=1001,
+                    pw_dir="/var/lib/relayinner-display",
+                ),
+            ), patch("relayinner_display.daemon.grp.getgrall", return_value=[]):
+                daemon.prepare_runtime()
+                daemon.start(now=start_time)
+                daemon.handle_session_message({"type": "session_ready"}, now=start_time)
+                actions = daemon.tick(now=start_time)
+
+        self.assertEqual(
+            actions,
+            [
+                {
+                    "type": "connect_console",
+                    "backend": "moonlight",
+                    "launcher": "moonlight",
+                    "cwd": str(state_dir),
+                    "argv": [
+                        "moonlight",
+                        "stream",
+                        "192.168.50.20",
+                        "Desktop",
+                        "--display-mode",
+                        "fullscreen",
+                    ],
+                }
+            ],
+        )
+        self.assertIsNotNone(captured_env)
+        captured_env = {} if captured_env is None else captured_env
+        self.assertEqual(captured_env["HOME"], "/var/lib/relayinner-display")
+        self.assertEqual(captured_env["USER"], "relayinner-display")
+        self.assertEqual(captured_env["LOGNAME"], "relayinner-display")
+        self.assertEqual(
+            captured_env["XDG_RUNTIME_DIR"],
+            str(config.runtime.run_dir / "user-runtime"),
+        )
+        self.assertEqual(captured_env["XDG_SESSION_TYPE"], "wayland")
 
     def test_running_vm_connects_with_moonlight_launch_contract(self) -> None:
         with TemporaryDirectory() as temp_dir:
