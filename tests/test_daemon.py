@@ -5,6 +5,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 import json
+import subprocess
 import unittest
 from unittest.mock import patch
 
@@ -459,7 +460,7 @@ class DisplayDaemonTests(unittest.TestCase):
             self.assertEqual((state_dir / "portable.dat").stat().st_mode & 0o777, 0o600)
             self.assertEqual((config.runtime.run_dir / "user-runtime").stat().st_mode & 0o777, 0o700)
 
-    def test_running_vm_detects_paired_moonlight_workspace_with_session_environment(self) -> None:
+    def test_running_vm_detects_paired_moonlight_workspace_with_headless_helper_environment(self) -> None:
         with TemporaryDirectory() as temp_dir:
             state_dir = Path(temp_dir) / "moonlight-state"
             config = build_config(
@@ -467,6 +468,7 @@ class DisplayDaemonTests(unittest.TestCase):
                 backend="moonlight",
                 moonlight_state_dir=state_dir,
             )
+            captured_version_env: dict[str, str] | None = None
             captured_env: dict[str, str] | None = None
 
             def fake_command_runner(
@@ -478,8 +480,10 @@ class DisplayDaemonTests(unittest.TestCase):
                 check: bool = False,
                 **_: object,
             ) -> SimpleNamespace:
+                nonlocal captured_version_env
                 nonlocal captured_env
                 if command == ["/usr/bin/moonlight", "--version"]:
+                    captured_version_env = env
                     return SimpleNamespace(returncode=0, stdout="Moonlight 6.1.0\n", stderr="")
                 if command == ["/usr/bin/moonlight", "list", "192.168.50.20", "--csv"]:
                     captured_env = env
@@ -532,8 +536,11 @@ class DisplayDaemonTests(unittest.TestCase):
                 }
             ],
         )
+        self.assertIsNotNone(captured_version_env)
         self.assertIsNotNone(captured_env)
+        captured_version_env = {} if captured_version_env is None else captured_version_env
         captured_env = {} if captured_env is None else captured_env
+        self.assertEqual(captured_version_env["QT_QPA_PLATFORM"], "offscreen")
         self.assertEqual(captured_env["HOME"], "/var/lib/relayinner-display")
         self.assertEqual(captured_env["USER"], "relayinner-display")
         self.assertEqual(captured_env["LOGNAME"], "relayinner-display")
@@ -542,6 +549,7 @@ class DisplayDaemonTests(unittest.TestCase):
             str(config.runtime.run_dir / "user-runtime"),
         )
         self.assertEqual(captured_env["XDG_SESSION_TYPE"], "wayland")
+        self.assertEqual(captured_env["QT_QPA_PLATFORM"], "offscreen")
 
     def test_running_vm_connects_with_moonlight_launch_contract(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -1107,6 +1115,54 @@ class DisplayDaemonTests(unittest.TestCase):
             daemon.state.degraded_reason,
             "Console preparation failed for backend=moonlight: "
             "Configured Moonlight app is not available on 192.168.50.20: Steam Big Picture",
+        )
+
+    def test_moonlight_list_timeout_enters_degraded(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            state_dir = Path(temp_dir) / "moonlight-state"
+            config = build_config(
+                Path(temp_dir),
+                backend="moonlight",
+                moonlight_state_dir=state_dir,
+            )
+
+            def fake_command_runner(
+                command: list[str],
+                cwd: str | None = None,
+                text: bool = True,
+                capture_output: bool = True,
+                check: bool = False,
+                **kwargs: object,
+            ) -> SimpleNamespace:
+                if command == ["/usr/bin/moonlight", "--version"]:
+                    self.assertEqual(kwargs["timeout"], 10)
+                    return SimpleNamespace(returncode=0, stdout="Moonlight 6.1.0\n", stderr="")
+                if command == ["/usr/bin/moonlight", "list", "192.168.50.20", "--csv"]:
+                    self.assertEqual(kwargs["timeout"], 10)
+                    raise subprocess.TimeoutExpired(command, kwargs["timeout"])
+                raise AssertionError(f"Unexpected Moonlight command: {command}")
+
+            daemon = DisplayDaemon(
+                config=config,
+                proxmox=FakeProxmoxClient(["running"]),
+                dependency_finder=lambda name: f"/usr/bin/{Path(name).name}",
+                command_runner=fake_command_runner,
+                tcp_connect_probe=lambda host, port, timeout_s: None,
+            )
+            start_time = datetime(2026, 4, 7, 0, 0, tzinfo=timezone.utc)
+
+            daemon.prepare_runtime()
+            daemon.start(now=start_time)
+            daemon.handle_session_message({"type": "session_ready"}, now=start_time)
+            actions = daemon.tick(now=start_time)
+
+        self.assertEqual(actions, [{"type": "show_waiting", "reason": "degraded"}])
+        self.assertEqual(daemon.state.session_state, SessionState.DEGRADED)
+        self.assertEqual(
+            daemon.state.degraded_reason,
+            "Console preparation failed for backend=moonlight: "
+            "Moonlight command timed out after 10s: "
+            "/usr/bin/moonlight list 192.168.50.20 --csv",
         )
 
     def test_moonlight_pairing_timeout_reissues_pin(self) -> None:

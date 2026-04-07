@@ -971,12 +971,18 @@ class DisplayDaemon:
             return self.command_runner(
                 command,
                 cwd=str(moonlight.state_dir),
-                env=self._session_user_command_env(),
+                env=self._moonlight_helper_env(),
                 text=True,
                 capture_output=True,
                 check=False,
+                timeout=self.config.policy.command_timeout_s,
                 **self._session_user_command_kwargs(),
             )
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeValidationError(
+                "Moonlight command timed out after "
+                f"{self.config.policy.command_timeout_s}s: {' '.join(command)}"
+            ) from exc
         except OSError as exc:
             raise RuntimeValidationError(
                 f"Failed to run Moonlight command {' '.join(subcommand)}: {exc}"
@@ -1001,10 +1007,15 @@ class DisplayDaemon:
             "extra_groups": extra_groups,
         }
 
-    def _session_user_command_env(self) -> dict[str, str]:
+    def _moonlight_helper_env(self) -> dict[str, str]:
         env = dict(os.environ)
         env.setdefault("PATH", os.defpath)
         env["XDG_SESSION_TYPE"] = "wayland"
+        # Moonlight's CLI helpers still construct QGuiApplication even for
+        # non-interactive commands like `list` and `--version`. Force a
+        # headless Qt platform here so daemon-side checks don't fall back to
+        # EGLFS/DRM when they run outside the kiosk's Wayland session.
+        env["QT_QPA_PLATFORM"] = "offscreen"
 
         if os.geteuid() != 0:
             env.setdefault("XDG_RUNTIME_DIR", str(self._session_runtime_dir()))
@@ -1276,10 +1287,18 @@ class DisplayDaemon:
         try:
             completed = self.command_runner(
                 command,
+                env=self._moonlight_helper_env(),
                 text=True,
                 capture_output=True,
                 check=False,
+                timeout=self.config.policy.command_timeout_s,
+                **self._session_user_command_kwargs(),
             )
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeValidationError(
+                "Moonlight version check timed out after "
+                f"{self.config.policy.command_timeout_s}s: {binary}"
+            ) from exc
         except OSError as exc:
             raise RuntimeValidationError(
                 f"Failed to read Moonlight version from {binary}: {exc}"
