@@ -29,7 +29,7 @@ When `console_backend = "moonlight"`, operators also need Linux `moonlight-qt` v
    - `[kiosk].compositor` if you need to override the default `auto` behavior; `auto` resolves to `cage` for `spice`, `vnc`, and `looking-glass`, and to `sway` for `moonlight`
    - `[console.vnc].display_number` plus matching VM `args: -vnc 127.0.0.1:<display_number>` when using `console_backend = "vnc"`
    - `[console.looking_glass].shm_file` plus any renderer or SPICE overrides when using `console_backend = "looking-glass"`
-   - `[console.moonlight].host` plus any non-default `app`, `base_port`, or `state_dir` when using `console_backend = "moonlight"`
+   - `[console.moonlight].host` plus any non-default `app`, `base_port`, `resolution`, or `state_dir` when using `console_backend = "moonlight"`
    - `[display].output_name` if you want to pin a specific connector name; on the managed sway path this also pins workspace `1` to that connector when it is currently connected
    - `[input].power_button_event` if the default evdev path does not match the host
 4. Start the services after editing the config:
@@ -103,7 +103,7 @@ For the required host and guest preparation, follow the upstream documentation:
 
 ## Moonlight Backend
 
-Use `console_backend = "moonlight"` only after the guest already runs Sunshine and the Proxmox host already has Linux `moonlight-qt` version `6.0.0` or newer. Specs 30 through 32 plus Specs 50 through 51 cover the backend contract, persistent workspace, PIN-assist pairing, live app validation, direct `moonlight stream` launch, reconnect behavior, compositor selection, and the managed sway runtime:
+Use `console_backend = "moonlight"` only after the guest already runs Sunshine and the Proxmox host already has Linux `moonlight-qt` version `6.0.0` or newer. Specs 30 through 32, Specs 40 through 41, and Specs 50 through 51 cover the backend contract, persistent workspace, PIN-assist pairing, Desktop fast-path behavior, optional client resolution override, direct `moonlight stream` launch, reconnect behavior, compositor selection, and the managed sway runtime:
 
 - the installer does not configure Sunshine inside the guest
 - the relay does not store Sunshine usernames or passwords
@@ -123,6 +123,7 @@ binary = "moonlight"
 host = "192.168.50.20"
 base_port = 47989
 app = "Desktop"
+resolution = "1920x1080"  # optional
 state_dir = "/var/lib/relayinner-display/moonlight"
 quit_app_after_session = false
 ```
@@ -133,11 +134,11 @@ On that managed sway path, the kiosk launcher writes `/run/relayinner-display/sw
 
 If you are enabling Moonlight on an existing relay install that previously resolved to `cage`, rerun `sudo ./install.sh` first so the host package set includes `sway` for the new resolved compositor.
 
-`app` is matched case-insensitively against the live Sunshine app list from `moonlight list --csv` when you target a non-`Desktop` Sunshine entry. `quit_app_after_session = true` is valid only for non-`Desktop` apps; the `Desktop` entry is treated as a stream surface, not a relay-managed launchable program.
+`app` is matched case-insensitively against the live Sunshine app list from `moonlight list --csv` when you target a non-`Desktop` Sunshine entry. `quit_app_after_session = true` is valid only for non-`Desktop` apps; the `Desktop` entry is treated as a stream surface, not a relay-managed launchable program. When `resolution` is set, it must use `<width>x<height>` dimensions; the relay trims surrounding whitespace, accepts either `x` or `X` in config input, and stores the canonical lowercase form.
 
-At runtime the daemon verifies that the configured Moonlight binary exists and reports version `6.0.0` or newer, prepares `state_dir` plus `portable.dat`, probes TCP reachability to the configured Sunshine host, and reads the managed workspace to determine whether the host is already paired. For `app = "Desktop"`, that paired workspace state is sufficient and the relay skips daemon-side catalog validation before launch. For non-`Desktop` apps, the daemon also runs `moonlight list <host-authority> --csv` from that managed workspace to verify that the configured app still exists before launch. Those daemon-side Moonlight helper calls run with a headless Qt platform so they do not fall back to EGLFS/DRM outside the kiosk session, and they still honor `[policy].command_timeout_s` so a hung CLI check fails with a clear degraded reason instead of wedging the appliance in `requesting_console`. If `base_port` differs from `47989`, the relay renders `host:port` for hostnames and IPv4 or `[ipv6]:port` for IPv6 literals before invoking Moonlight.
+At runtime the daemon verifies that the configured Moonlight binary exists and reports version `6.0.0` or newer, prepares `state_dir` plus `portable.dat`, probes TCP reachability to the configured Sunshine host, and reads the managed workspace to determine whether the host is already paired. For `app = "Desktop"`, that paired workspace state is sufficient and the relay skips daemon-side catalog validation before launch. For non-`Desktop` apps, the daemon also runs `moonlight list <host-authority> --csv` from that managed workspace to verify that the configured app still exists before launch. Those daemon-side Moonlight helper calls run with a headless Qt platform so they do not fall back to EGLFS/DRM outside the kiosk session, and they still honor `[policy].command_timeout_s` so a hung CLI check fails with a clear degraded reason instead of wedging the appliance in `requesting_console`. If `base_port` differs from `47989`, the relay renders `host:port` for hostnames and IPv4 or `[ipv6]:port` for IPv6 literals before invoking Moonlight. If `resolution` is set, the relay appends `--resolution <width>x<height>` before `--display-mode fullscreen` on every `moonlight stream` launch and mirrors that configured requested value into `moonlight_resolution` in the runtime state file.
 
-If the host is reachable but not paired, the daemon generates a 4-digit PIN, launches `moonlight pair <host-authority> --pin <pin>` inside the kiosk session, and moves the appliance into `waiting_for_pairing`. Moonlight's own pairing UI shows that PIN fullscreen; approve it in the Sunshine web UI `PIN` page on the guest-side host. The same PIN is also mirrored in `/run/relayinner-display/daemon.state.json` while approval is pending. Once the managed workspace shows the paired-host record, the relay clears the PIN and continues to `moonlight stream <host-authority> <app> --display-mode fullscreen` automatically. The relay appends `--quit-after` only when `quit_app_after_session = true`. The paired-host state remains in `state_dir` across daemon and host restarts.
+If the host is reachable but not paired, the daemon generates a 4-digit PIN, launches `moonlight pair <host-authority> --pin <pin>` inside the kiosk session, and moves the appliance into `waiting_for_pairing`. Moonlight's own pairing UI shows that PIN fullscreen; approve it in the Sunshine web UI `PIN` page on the guest-side host. The same PIN is also mirrored in `/run/relayinner-display/daemon.state.json` while approval is pending. Once the managed workspace shows the paired-host record, the relay clears the PIN and continues to `moonlight stream <host-authority> <app> [--resolution <width>x<height>] --display-mode fullscreen` automatically. The relay appends `--quit-after` only when `quit_app_after_session = true`. The paired-host state remains in `state_dir` across daemon and host restarts.
 
 If the configured app name does not exist in the live app list, the appliance enters controlled `degraded` state with a backend-tagged reason instead of launching an empty fullscreen Moonlight session. If Moonlight exits unexpectedly while the VM stays running and the Sunshine host remains reachable, the relay re-enters reconnect flow and repeats the same preflight checks before relaunching.
 
@@ -254,6 +255,7 @@ When VNC, Looking Glass, or Moonlight is selected, the same state file also incl
 - `moonlight_host`
 - `moonlight_base_port`
 - `moonlight_app`
+- `moonlight_resolution`
 - `moonlight_pair_state`
 - `moonlight_pair_pin` while pairing approval is pending
 
@@ -308,6 +310,6 @@ If Looking Glass reconnects repeatedly while the guest stays up, inspect the con
 
 If the state file shows `appliance_state=waiting_for_pairing`, open the Sunshine web UI on the guest-side host, go to the `PIN` page, and enter the current `moonlight_pair_pin` shown by Moonlight's pairing UI or in `/run/relayinner-display/daemon.state.json`. The relay rotates that PIN after 300 seconds if approval has not completed yet.
 
-If the state file or journal shows `console_backend=moonlight` and the appliance moves into `degraded`, verify that Linux `moonlight-qt` `6.0.0` or newer is installed, that `[console.moonlight].host`, `base_port`, and `app` point at the expected Sunshine host and app, and that the configured `state_dir` plus `portable.dat` are present and writable by the `relayinner-display` session user. If `app = "Desktop"`, confirm that `/run/relayinner-display/daemon.state.json` still reports `moonlight_pair_state = "paired"` and focus on stream/session failures. If `app` names another Sunshine entry, check `moonlight_app` in the state file against `moonlight list <host-authority> --csv`; the relay matches app names case-insensitively but requires an exact app-name match, and `quit_app_after_session = true` is only valid for non-`Desktop` apps.
+If the state file or journal shows `console_backend=moonlight` and the appliance moves into `degraded`, verify that Linux `moonlight-qt` `6.0.0` or newer is installed, that `[console.moonlight].host`, `base_port`, `app`, and optional `resolution` point at the expected Sunshine host and app, and that the configured `state_dir` plus `portable.dat` are present and writable by the `relayinner-display` session user. If `app = "Desktop"`, confirm that `/run/relayinner-display/daemon.state.json` still reports `moonlight_pair_state = "paired"` and focus on stream/session failures. If `app` names another Sunshine entry, check `moonlight_app` in the state file against `moonlight list <host-authority> --csv`; the relay matches app names case-insensitively but requires an exact app-name match, and `quit_app_after_session = true` is only valid for non-`Desktop` apps. `moonlight_resolution` in the same state file shows the configured requested override rather than a measured negotiated stream mode.
 
 If Moonlight reconnects repeatedly while the VM stays running, inspect `relayinner-display.console` log lines for `backend=moonlight` and confirm that the Sunshine host is still reachable and that the configured app still exists in the live Sunshine app list. The relay re-validates both before each relaunch.

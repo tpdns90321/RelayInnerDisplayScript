@@ -43,6 +43,7 @@ class RuntimeState:
     moonlight_host: str | None = None
     moonlight_base_port: int | None = None
     moonlight_app: str | None = None
+    moonlight_resolution: str | None = None
     moonlight_pair_state: MoonlightPairState = MoonlightPairState.UNKNOWN
     moonlight_pair_pin: str | None = None
     vm_power_state: str = "unknown"
@@ -100,6 +101,7 @@ class RuntimeState:
             "moonlight_host": self.moonlight_host,
             "moonlight_base_port": self.moonlight_base_port,
             "moonlight_app": self.moonlight_app,
+            "moonlight_resolution": self.moonlight_resolution,
             "moonlight_pair_state": self.moonlight_pair_state.value,
             "moonlight_pair_pin": self.moonlight_pair_pin,
             "appliance_state": self.session_state.public_value(),

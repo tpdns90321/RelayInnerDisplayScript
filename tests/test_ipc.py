@@ -23,6 +23,8 @@ class IPCTests(unittest.TestCase):
                 "stream",
                 "192.168.50.20",
                 "Desktop",
+                "--resolution",
+                "1920x1080",
                 "--display-mode",
                 "fullscreen",
             ],

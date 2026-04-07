@@ -223,6 +223,7 @@ class ConfigTests(unittest.TestCase):
             config.console.moonlight.state_dir,
             Path("/var/lib/relayinner-display/moonlight"),
         )
+        self.assertIsNone(config.console.moonlight.resolution)
         self.assertFalse(config.console.moonlight.quit_app_after_session)
         self.assertEqual(config.console.moonlight.host_authority, "192.168.50.20")
 
@@ -256,6 +257,7 @@ class ConfigTests(unittest.TestCase):
                 base_port = 48010
                 app = "Steam Big Picture"
                 state_dir = "/var/lib/relayinner-display/custom-moonlight"
+                resolution = " 3440X1440 "
                 quit_app_after_session = true
                 """
             ),
@@ -274,11 +276,26 @@ class ConfigTests(unittest.TestCase):
             config.console.moonlight.state_dir,
             Path("/var/lib/relayinner-display/custom-moonlight"),
         )
+        self.assertEqual(config.console.moonlight.resolution, "3440x1440")
         self.assertTrue(config.console.moonlight.quit_app_after_session)
         self.assertEqual(config.console.moonlight.host_authority, "[2001:db8::20]:48010")
         self.assertEqual(
             config.console.moonlight.portable_marker_path,
             Path("/var/lib/relayinner-display/custom-moonlight/portable.dat"),
+        )
+        self.assertEqual(
+            config.console.moonlight.argv,
+            [
+                "/usr/local/bin/moonlight",
+                "stream",
+                "[2001:db8::20]:48010",
+                "Steam Big Picture",
+                "--resolution",
+                "3440x1440",
+                "--display-mode",
+                "fullscreen",
+                "--quit-after",
+            ],
         )
 
     def test_kiosk_auto_is_explicitly_accepted(self) -> None:
@@ -619,6 +636,28 @@ class ConfigTests(unittest.TestCase):
 
             with self.assertRaises(ConfigError):
                 load_config(config_path)
+
+    def test_moonlight_resolution_must_be_valid(self) -> None:
+        for resolution in ("1080p", "1920*1080", "1920 x 1080", "0x1080", "1920x0"):
+            with self.subTest(resolution=resolution):
+                content = VALID_CONFIG.replace(
+                    'console_backend = "spice"',
+                    'console_backend = "moonlight"',
+                )
+                content = content.replace(
+                    "[console.spice]\nvv_path = \"/run/relayinner-display/console/spice-current.vv\"\n",
+                    (
+                        "[console.moonlight]\n"
+                        "host = \"192.168.50.20\"\n"
+                        f"resolution = \"{resolution}\"\n"
+                    ),
+                )
+                with TemporaryDirectory() as temp_dir:
+                    config_path = Path(temp_dir) / "config.toml"
+                    config_path.write_text(content, encoding="utf-8")
+
+                    with self.assertRaises(ConfigError):
+                        load_config(config_path)
 
     def test_invalid_dpms_policy_raises(self) -> None:
         content = VALID_CONFIG + '\ndpms_policy = "host-suspend"\n'

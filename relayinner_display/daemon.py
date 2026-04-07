@@ -252,6 +252,11 @@ class DisplayDaemon:
             moonlight_app=(
                 config.console.moonlight.app if config.console.moonlight is not None else None
             ),
+            moonlight_resolution=(
+                config.console.moonlight.resolution
+                if config.console.moonlight is not None
+                else None
+            ),
         )
         self.session_ready = False
         self.console_running = False
@@ -1255,6 +1260,13 @@ class DisplayDaemon:
                     "Validated Moonlight app=%s from live app list on host=%s",
                     moonlight.app,
                     moonlight.host_authority,
+                )
+
+            if moonlight.resolution is not None:
+                self.console_logger.info(
+                    "Applying Moonlight resolution override for host=%s: %s",
+                    moonlight.host_authority,
+                    moonlight.resolution,
                 )
 
             self.console_logger.info(

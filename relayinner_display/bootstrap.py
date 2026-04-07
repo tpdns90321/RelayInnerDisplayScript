@@ -259,6 +259,7 @@ def render_sample_config() -> str:
         # host = "192.168.50.20"
         # base_port = 47989
         # app = "Desktop"
+        # resolution = "1920x1080"  # optional
         # state_dir = "/var/lib/relayinner-display/moonlight"
         # quit_app_after_session = false  # valid only for non-Desktop apps
 

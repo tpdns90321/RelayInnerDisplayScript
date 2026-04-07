@@ -46,6 +46,7 @@ DEFAULT_MOONLIGHT_STATE_DIR = Path("/var/lib/relayinner-display/moonlight")
 MAX_VNC_DISPLAY_NUMBER = 65535 - 5900
 MAX_PORT_NUMBER = 65535
 HOSTNAME_LABEL_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$")
+MOONLIGHT_RESOLUTION_RE = re.compile(r"^(?P<width>\d+)[xX](?P<height>\d+)$")
 
 
 class ConfigError(ValueError):
@@ -158,6 +159,7 @@ class ConsoleMoonlightConfig:
     base_port: int = DEFAULT_MOONLIGHT_BASE_PORT
     app: str = DEFAULT_MOONLIGHT_APP
     state_dir: Path = DEFAULT_MOONLIGHT_STATE_DIR
+    resolution: str | None = None
     quit_app_after_session: bool = False
 
     def __post_init__(self) -> None:
@@ -182,9 +184,10 @@ class ConsoleMoonlightConfig:
             "stream",
             self.host_authority,
             self.app,
-            "--display-mode",
-            "fullscreen",
         ]
+        if self.resolution is not None:
+            argv.extend(["--resolution", self.resolution])
+        argv.extend(["--display-mode", "fullscreen"])
         if self.quit_app_after_session:
             argv.append("--quit-after")
         return argv
@@ -625,6 +628,7 @@ def _parse_console_config(
             "base_port",
             "app",
             "state_dir",
+            "resolution",
             "quit_app_after_session",
         },
         "console.moonlight",
@@ -654,6 +658,7 @@ def _parse_console_config(
                 "state_dir",
                 default=DEFAULT_MOONLIGHT_STATE_DIR,
             ),
+            resolution=_optional_moonlight_resolution(moonlight_block, "resolution"),
             quit_app_after_session=_optional_bool(
                 moonlight_block,
                 "quit_app_after_session",
@@ -751,6 +756,26 @@ def _render_moonlight_host_authority(host: str, base_port: int) -> str:
     if host_ip is not None and host_ip.version == 6:
         return f"[{host}]:{base_port}"
     return f"{host}:{base_port}"
+
+
+def _optional_moonlight_resolution(table: dict[str, Any], key: str) -> str | None:
+    if key not in table:
+        return None
+
+    value = table.get(key)
+    if not isinstance(value, str):
+        raise ConfigError(f"Missing or invalid string value for {key!r}")
+
+    normalized = value.strip()
+    match = MOONLIGHT_RESOLUTION_RE.fullmatch(normalized)
+    if match is None:
+        raise ConfigError(f"{key!r} must be in '<width>x<height>' form")
+
+    width = int(match.group("width"))
+    height = int(match.group("height"))
+    if width <= 0 or height <= 0:
+        raise ConfigError(f"{key!r} width and height must be > 0")
+    return f"{width}x{height}"
 
 
 def _require_child_path(root: Path, child: Path, label: str) -> None:
