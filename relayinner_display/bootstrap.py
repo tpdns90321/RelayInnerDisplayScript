@@ -234,9 +234,10 @@ def render_sample_config() -> str:
         # Sunshine guest that you prepared outside this installer. If the host is
         # reachable but unpaired, the kiosk shows a PIN for the Sunshine web UI PIN
         # page; no extra relay config keys or stored Sunshine credentials are needed.
-        # The relay matches app against the live Sunshine app list case-insensitively,
-        # launches it fullscreen with moonlight stream, and reconnects if Moonlight
-        # exits unexpectedly while the VM remains running.
+        # The relay launches paired Desktop streams directly from the managed workspace
+        # state, validates other app names against the live Sunshine app list
+        # case-insensitively, and reconnects if Moonlight exits unexpectedly while the
+        # VM remains running.
         #
         # [console.moonlight]
         # binary = "moonlight"

@@ -484,12 +484,15 @@ class DisplayDaemonTests(unittest.TestCase):
             self.assertEqual((state_dir / "portable.dat").stat().st_mode & 0o777, 0o600)
             self.assertEqual((config.runtime.run_dir / "user-runtime").stat().st_mode & 0o777, 0o700)
 
-    def test_running_vm_detects_paired_moonlight_workspace_with_headless_helper_environment(self) -> None:
+    def test_running_vm_validates_non_desktop_moonlight_app_with_headless_helper_environment(
+        self,
+    ) -> None:
         with TemporaryDirectory() as temp_dir:
             state_dir = Path(temp_dir) / "moonlight-state"
             config = build_config(
                 Path(temp_dir),
                 backend="moonlight",
+                moonlight_app="Playnite",
                 moonlight_state_dir=state_dir,
             )
             captured_version_env: dict[str, str] | None = None
@@ -513,7 +516,7 @@ class DisplayDaemonTests(unittest.TestCase):
                     captured_env = env
                     return SimpleNamespace(
                         returncode=0,
-                        stdout=moonlight_app_list_csv("Desktop"),
+                        stdout=moonlight_app_list_csv("Desktop", "Playnite"),
                         stderr="",
                     )
                 raise AssertionError(f"Unexpected Moonlight command: {command}")
@@ -554,7 +557,7 @@ class DisplayDaemonTests(unittest.TestCase):
                         "moonlight",
                         "stream",
                         "192.168.50.20",
-                        "Desktop",
+                        "Playnite",
                         "--display-mode",
                         "fullscreen",
                     ],
@@ -599,12 +602,6 @@ class DisplayDaemonTests(unittest.TestCase):
                 moonlight_commands.append((command, cwd))
                 if command == ["/usr/bin/moonlight", "--version"]:
                     return SimpleNamespace(returncode=0, stdout="Moonlight 6.1.0\n", stderr="")
-                if command == ["/usr/bin/moonlight", "list", "[2001:db8::10]:48010", "--csv"]:
-                    return SimpleNamespace(
-                        returncode=0,
-                        stdout=moonlight_app_list_csv("Desktop"),
-                        stderr="",
-                    )
                 raise AssertionError(f"Unexpected Moonlight command: {command}")
 
             daemon = DisplayDaemon(
@@ -635,7 +632,6 @@ class DisplayDaemonTests(unittest.TestCase):
             moonlight_commands,
             [
                 (["/usr/bin/moonlight", "--version"], None),
-                (["/usr/bin/moonlight", "list", "[2001:db8::10]:48010", "--csv"], str(state_dir)),
             ],
         )
         self.assertEqual(
@@ -679,12 +675,6 @@ class DisplayDaemonTests(unittest.TestCase):
                 moonlight_commands.append((command, cwd))
                 if command == ["/usr/bin/moonlight", "--version"]:
                     return SimpleNamespace(returncode=0, stdout="Moonlight 6.1.0\n", stderr="")
-                if command == ["/usr/bin/moonlight", "list", "192.168.50.20", "--csv"]:
-                    return SimpleNamespace(
-                        returncode=0,
-                        stdout=moonlight_app_list_csv("Desktop"),
-                        stderr="",
-                    )
                 raise AssertionError(f"Unexpected Moonlight command: {command}")
 
             daemon = DisplayDaemon(
@@ -737,8 +727,6 @@ class DisplayDaemonTests(unittest.TestCase):
             moonlight_commands,
             [
                 (["/usr/bin/moonlight", "--version"], None),
-                (["/usr/bin/moonlight", "list", "192.168.50.20", "--csv"], str(state_dir)),
-                (["/usr/bin/moonlight", "list", "192.168.50.20", "--csv"], str(state_dir)),
             ],
         )
         self.assertEqual(daemon.state.session_state, SessionState.REQUESTING_CONSOLE)
@@ -905,7 +893,6 @@ class DisplayDaemonTests(unittest.TestCase):
             moonlight_commands,
             [
                 (["/usr/bin/moonlight", "--version"], None),
-                (["/usr/bin/moonlight", "list", "192.168.50.20", "--csv"], str(state_dir)),
             ],
         )
 
@@ -1039,7 +1026,7 @@ class DisplayDaemonTests(unittest.TestCase):
             config = build_config(
                 Path(temp_dir),
                 backend="moonlight",
-                moonlight_app="desktop",
+                moonlight_app="playnite",
                 moonlight_state_dir=state_dir,
             )
 
@@ -1056,7 +1043,7 @@ class DisplayDaemonTests(unittest.TestCase):
                 if command == ["/usr/bin/moonlight", "list", "192.168.50.20", "--csv"]:
                     return SimpleNamespace(
                         returncode=0,
-                        stdout=moonlight_app_list_csv("Desktop"),
+                        stdout=moonlight_app_list_csv("Desktop", "Playnite"),
                         stderr="",
                     )
                 raise AssertionError(f"Unexpected Moonlight command: {command}")
@@ -1088,7 +1075,7 @@ class DisplayDaemonTests(unittest.TestCase):
                         "moonlight",
                         "stream",
                         "192.168.50.20",
-                        "desktop",
+                        "playnite",
                         "--display-mode",
                         "fullscreen",
                     ],
@@ -1131,20 +1118,83 @@ class DisplayDaemonTests(unittest.TestCase):
 
         self.assertEqual(actions, [{"type": "show_waiting", "reason": "degraded"}])
         self.assertEqual(daemon.state.session_state, SessionState.DEGRADED)
-        self.assertEqual(daemon.state.moonlight_pair_state, MoonlightPairState.UNKNOWN)
+        self.assertEqual(daemon.state.moonlight_pair_state, MoonlightPairState.PAIRED)
         self.assertEqual(payload["moonlight_app"], "Steam Big Picture")
+        self.assertEqual(payload["moonlight_pair_state"], "paired")
         self.assertEqual(
             daemon.state.degraded_reason,
             "Console preparation failed for backend=moonlight: "
             "Configured Moonlight app is not available on 192.168.50.20: Steam Big Picture",
         )
 
-    def test_moonlight_list_timeout_enters_degraded(self) -> None:
+    def test_moonlight_desktop_stream_skips_list_timeout_when_workspace_is_paired(self) -> None:
         with TemporaryDirectory() as temp_dir:
             state_dir = Path(temp_dir) / "moonlight-state"
             config = build_config(
                 Path(temp_dir),
                 backend="moonlight",
+                moonlight_state_dir=state_dir,
+            )
+
+            def fake_command_runner(
+                command: list[str],
+                cwd: str | None = None,
+                text: bool = True,
+                capture_output: bool = True,
+                check: bool = False,
+                **kwargs: object,
+            ) -> SimpleNamespace:
+                if command == ["/usr/bin/moonlight", "--version"]:
+                    self.assertEqual(kwargs["timeout"], 10)
+                    return SimpleNamespace(returncode=0, stdout="Moonlight 6.1.0\n", stderr="")
+                raise AssertionError(f"Unexpected Moonlight command: {command}")
+
+            daemon = DisplayDaemon(
+                config=config,
+                proxmox=FakeProxmoxClient(["running"]),
+                dependency_finder=lambda name: f"/usr/bin/{Path(name).name}",
+                command_runner=fake_command_runner,
+                tcp_connect_probe=lambda host, port, timeout_s: None,
+            )
+            start_time = datetime(2026, 4, 7, 0, 0, tzinfo=timezone.utc)
+
+            daemon.prepare_runtime()
+            write_moonlight_host_settings(state_dir, "192.168.50.20")
+            daemon.start(now=start_time)
+            daemon.handle_session_message({"type": "session_ready"}, now=start_time)
+            actions = daemon.tick(now=start_time)
+
+        self.assertEqual(
+            actions,
+            [
+                {
+                    "type": "connect_console",
+                    "backend": "moonlight",
+                    "launcher": "moonlight",
+                    "cwd": str(state_dir),
+                    "argv": [
+                        "moonlight",
+                        "stream",
+                        "192.168.50.20",
+                        "Desktop",
+                        "--display-mode",
+                        "fullscreen",
+                    ],
+                }
+            ],
+        )
+        self.assertEqual(daemon.state.session_state, SessionState.REQUESTING_CONSOLE)
+        self.assertEqual(daemon.state.moonlight_pair_state, MoonlightPairState.PAIRED)
+
+    def test_moonlight_non_desktop_list_timeout_enters_degraded_without_clearing_pair_state(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temp_dir:
+            state_dir = Path(temp_dir) / "moonlight-state"
+            config = build_config(
+                Path(temp_dir),
+                backend="moonlight",
+                moonlight_app="Playnite",
                 moonlight_state_dir=state_dir,
             )
 
@@ -1178,9 +1228,12 @@ class DisplayDaemonTests(unittest.TestCase):
             daemon.start(now=start_time)
             daemon.handle_session_message({"type": "session_ready"}, now=start_time)
             actions = daemon.tick(now=start_time)
+            payload = json.loads(config.runtime.daemon_state_path.read_text(encoding="utf-8"))
 
         self.assertEqual(actions, [{"type": "show_waiting", "reason": "degraded"}])
         self.assertEqual(daemon.state.session_state, SessionState.DEGRADED)
+        self.assertEqual(daemon.state.moonlight_pair_state, MoonlightPairState.PAIRED)
+        self.assertEqual(payload["moonlight_pair_state"], "paired")
         self.assertEqual(
             daemon.state.degraded_reason,
             "Console preparation failed for backend=moonlight: "

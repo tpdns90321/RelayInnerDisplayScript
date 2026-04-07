@@ -60,16 +60,16 @@ Host reachability contract:
 
 Pair completion contract:
 
-- Pair completion is defined as a successful `moonlight list <host-authority> --csv` from the managed workspace.
-- The relay must not infer pair completion by parsing translated error strings.
+- Pair completion is defined as the managed workspace containing a host record that matches `host` and `base_port` and includes Moonlight's persisted server certificate material.
+- The relay must not infer pair completion by parsing translated stderr text or by assuming that `moonlight list` availability is equivalent to pairing state.
 
 Pair-assist flow:
 
-1. If the host is reachable, the daemon runs `moonlight list <host-authority> --csv`.
-2. If that command succeeds, the host is treated as paired and the PIN-assist flow is skipped.
-3. If that command fails while the host remains reachable, the daemon generates a 4-digit PIN and runs `moonlight pair <host-authority> --pin <pin>`.
-4. After the pair command is issued, the daemon enters `waiting_for_pairing` and keeps polling `moonlight list <host-authority> --csv`.
-5. When `moonlight list` succeeds, the daemon clears the active PIN and transitions to the ordinary console-launch path.
+1. If the host is reachable, the daemon inspects the managed Moonlight workspace for a matching paired-host record.
+2. If that paired-host record already exists, the host is treated as paired and the PIN-assist flow is skipped.
+3. If the record does not exist while the host remains reachable, the daemon generates a 4-digit PIN and runs `moonlight pair <host-authority> --pin <pin>` in the kiosk session.
+4. After the pair command is issued, the daemon enters `waiting_for_pairing` and keeps polling the managed workspace for the paired-host record that Moonlight persists on success.
+5. When that paired-host record appears, the daemon clears the active PIN and transitions to the ordinary console-launch path.
 
 PIN lifecycle rules:
 
@@ -189,7 +189,7 @@ IPC and state behavior:
 Restart behavior:
 
 - paired workspace survives daemon restart
-- restart does not regenerate a PIN when `moonlight list --csv` already succeeds
+- restart does not regenerate a PIN when the managed workspace already contains the paired-host record
 
 ## Rollout / Backward compatibility
 

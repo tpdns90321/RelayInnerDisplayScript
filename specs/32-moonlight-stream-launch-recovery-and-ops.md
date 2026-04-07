@@ -61,8 +61,9 @@ Config rules finalized in this spec:
 
 App validation contract:
 
-- Before launch, the daemon runs `moonlight list <host-authority> --csv` from the managed workspace.
-- The daemon parses the CSV output and requires a case-insensitive exact app-name match.
+- Before launch, the daemon skips app-list validation when `app = "Desktop"` and pairing has already been confirmed from the managed workspace.
+- Before launch for any non-`Desktop` app, the daemon runs `moonlight list <host-authority> --csv` from the managed workspace.
+- For those non-`Desktop` apps, the daemon parses the CSV output and requires a case-insensitive exact app-name match.
 - If the configured app does not exist, the relay enters `degraded` with a backend-tagged reason.
 
 Moonlight launch contract:
@@ -140,7 +141,7 @@ Runtime data:
 
 Persistence rules:
 
-- App-list validation is always derived from live `moonlight list --csv` output; the relay does not persist its own copy of the Sunshine app catalog.
+- App-list validation for non-`Desktop` apps is always derived from live `moonlight list --csv` output; the relay does not persist its own copy of the Sunshine app catalog.
 - The relay continues to reuse the persistent Moonlight workspace from Spec 31.
 - `moonlight_app` in runtime state is operational metadata only.
 

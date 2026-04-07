@@ -17,7 +17,13 @@ import stat
 import subprocess
 import time
 
-from .config import AppConfig, ConfigError, build_fallback_config, load_config
+from .config import (
+    AppConfig,
+    ConfigError,
+    DEFAULT_MOONLIGHT_APP,
+    build_fallback_config,
+    load_config,
+)
 from .input import EvdevPowerButtonSource, LogindPowerButtonPolicyChecker, PowerButtonError
 from .ipc import decode_message, encode_message, validate_session_message
 from .models import MoonlightPairState, RuntimeState, SessionState, write_runtime_state
@@ -783,7 +789,6 @@ class DisplayDaemon:
         had_console = self.console_running or self.console_pid is not None
         self.console_running = False
         self.console_pid = None
-        self._clear_moonlight_pair_state()
         self.state.active_console_backend = None
         self.state.last_error = reason
         self.state.degraded_reason = reason
@@ -1024,6 +1029,13 @@ class DisplayDaemon:
         configured_app = moonlight.app.strip().casefold()
         return any(app.strip().casefold() == configured_app for app in available_apps)
 
+    def _moonlight_app_uses_desktop_stream(self) -> bool:
+        moonlight = self.config.console.moonlight
+        if moonlight is None:
+            raise AssertionError("Moonlight backend selected without console.moonlight config")
+
+        return moonlight.app.strip().casefold() == DEFAULT_MOONLIGHT_APP.casefold()
+
     def _moonlight_list_apps(self) -> list[str]:
         moonlight = self.config.console.moonlight
         if moonlight is None:
@@ -1222,11 +1234,24 @@ class DisplayDaemon:
             moonlight = self.config.console.moonlight
             if moonlight is None:
                 raise AssertionError("Moonlight backend selected without console.moonlight config")
-            available_apps = self._moonlight_list_apps()
-            if not self._moonlight_app_is_available(available_apps):
-                raise RuntimeValidationError(
-                    "Configured Moonlight app is not available on "
-                    f"{moonlight.host_authority}: {moonlight.app}"
+
+            if self._moonlight_app_uses_desktop_stream():
+                self.console_logger.info(
+                    "Skipping Moonlight app-list validation for Desktop stream on host=%s; "
+                    "paired workspace state already exists",
+                    moonlight.host_authority,
+                )
+            else:
+                available_apps = self._moonlight_list_apps()
+                if not self._moonlight_app_is_available(available_apps):
+                    raise RuntimeValidationError(
+                        "Configured Moonlight app is not available on "
+                        f"{moonlight.host_authority}: {moonlight.app}"
+                    )
+                self.console_logger.info(
+                    "Validated Moonlight app=%s from live app list on host=%s",
+                    moonlight.app,
+                    moonlight.host_authority,
                 )
 
             self.console_logger.info(
