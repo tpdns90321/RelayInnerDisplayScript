@@ -50,6 +50,14 @@ MIN_MOONLIGHT_VERSION = (6, 0, 0)
 MOONLIGHT_PAIR_TIMEOUT = timedelta(seconds=300)
 MOONLIGHT_HOST_PROBE_TIMEOUT_S = 1.0
 VERSION_RE = re.compile(r"(\d+)\.(\d+)\.(\d+)")
+MOONLIGHT_SETTINGS_KEY_RE = re.compile(r"(?P<index>\d+)[/\\\\](?P<field>[A-Za-z0-9_]+)")
+MOONLIGHT_SETTINGS_SECTIONS = ("hostsbackup", "hosts")
+MOONLIGHT_HOST_ADDRESS_FIELDS = (
+    ("manualaddress", "manualport"),
+    ("localaddress", "localport"),
+    ("remoteaddress", "remoteport"),
+    ("ipv6address", "ipv6port"),
+)
 
 
 class RuntimeValidationError(RuntimeError):
@@ -840,17 +848,11 @@ class DisplayDaemon:
             return True, [{"type": "show_waiting", "reason": "reconnecting"}]
 
         self.next_reconnect_at = None
-        available_apps = self._moonlight_list_apps()
-        if available_apps is not None:
+        if self._moonlight_workspace_host_is_paired():
             self._set_moonlight_pair_state(MoonlightPairState.PAIRED)
             self.state.moonlight_pair_pin = None
             self.moonlight_pair_requested_at = None
             self.moonlight_pair_launch_pending = False
-            if not self._moonlight_app_is_available(available_apps):
-                raise RuntimeValidationError(
-                    "Configured Moonlight app is not available on "
-                    f"{moonlight.host_authority}: {moonlight.app}"
-                )
             self.state.last_error = None
             return False, []
 
@@ -923,6 +925,97 @@ class DisplayDaemon:
             return False
         return True
 
+    def _moonlight_workspace_host_is_paired(self) -> bool:
+        moonlight = self.config.console.moonlight
+        if moonlight is None:
+            raise AssertionError("Moonlight backend selected without console.moonlight config")
+
+        configured_host = self._normalize_moonlight_host_value(moonlight.host)
+        for record in self._moonlight_workspace_host_records():
+            if not self._moonlight_workspace_record_matches_host(
+                record,
+                configured_host,
+                moonlight.base_port,
+            ):
+                continue
+            if record.get("srvcert", "").strip():
+                return True
+        return False
+
+    def _moonlight_workspace_host_records(self) -> list[dict[str, str]]:
+        moonlight = self.config.console.moonlight
+        if moonlight is None:
+            raise AssertionError("Moonlight backend selected without console.moonlight config")
+
+        records_by_section: dict[str, dict[int, dict[str, str]]] = {
+            section: {} for section in MOONLIGHT_SETTINGS_SECTIONS
+        }
+        for settings_path in sorted(moonlight.state_dir.rglob("*.ini")):
+            if not settings_path.is_file():
+                continue
+            try:
+                lines = settings_path.read_text(encoding="utf-8", errors="replace").splitlines()
+            except OSError:
+                continue
+
+            active_section: str | None = None
+            for raw_line in lines:
+                line = raw_line.strip()
+                if not line or line.startswith(("#", ";")):
+                    continue
+                if line.startswith("[") and line.endswith("]"):
+                    active_section = line[1:-1].strip().casefold()
+                    continue
+                if active_section not in records_by_section:
+                    continue
+
+                key, separator, value = line.partition("=")
+                if not separator:
+                    continue
+                match = MOONLIGHT_SETTINGS_KEY_RE.fullmatch(key.strip())
+                if match is None:
+                    continue
+
+                index = int(match.group("index"))
+                field = match.group("field").casefold()
+                records_by_section[active_section].setdefault(index, {})[field] = value.strip()
+
+        for section in MOONLIGHT_SETTINGS_SECTIONS:
+            section_records = records_by_section[section]
+            if section_records:
+                return [section_records[index] for index in sorted(section_records)]
+        return []
+
+    def _moonlight_workspace_record_matches_host(
+        self,
+        record: dict[str, str],
+        configured_host: str,
+        configured_port: int,
+    ) -> bool:
+        hostname = self._normalize_moonlight_host_value(record.get("hostname", ""))
+        if hostname and hostname == configured_host:
+            return True
+
+        for address_field, port_field in MOONLIGHT_HOST_ADDRESS_FIELDS:
+            address = self._normalize_moonlight_host_value(record.get(address_field, ""))
+            if not address or address != configured_host:
+                continue
+
+            configured_record_port = record.get(port_field, "").strip()
+            if not configured_record_port:
+                return True
+            try:
+                return int(configured_record_port) == configured_port
+            except ValueError:
+                return False
+        return False
+
+    def _normalize_moonlight_host_value(self, value: str) -> str:
+        normalized = value.strip()
+        if normalized.startswith("[") and normalized.endswith("]"):
+            normalized = normalized[1:-1]
+        return normalized.casefold()
+
     def _moonlight_app_is_available(self, available_apps: list[str]) -> bool:
         moonlight = self.config.console.moonlight
         if moonlight is None:
@@ -931,14 +1024,23 @@ class DisplayDaemon:
         configured_app = moonlight.app.strip().casefold()
         return any(app.strip().casefold() == configured_app for app in available_apps)
 
-    def _moonlight_list_apps(self) -> list[str] | None:
+    def _moonlight_list_apps(self) -> list[str]:
         moonlight = self.config.console.moonlight
         if moonlight is None:
             raise AssertionError("Moonlight backend selected without console.moonlight config")
 
         completed = self._run_moonlight_command(["list", moonlight.host_authority])
         if completed.returncode != 0:
-            return None
+            detail = completed.stderr.strip() or completed.stdout.strip()
+            if detail:
+                raise RuntimeValidationError(
+                    "Moonlight app-list retrieval failed for "
+                    f"{moonlight.host_authority}: {detail}"
+                )
+            raise RuntimeValidationError(
+                "Moonlight app-list retrieval failed for "
+                f"{moonlight.host_authority} with exit code {completed.returncode}"
+            )
         return parse_moonlight_app_list_csv(completed.stdout)
 
     def _prepare_moonlight_pair_launch(self, pin: str | None) -> dict[str, object]:
@@ -1120,6 +1222,12 @@ class DisplayDaemon:
             moonlight = self.config.console.moonlight
             if moonlight is None:
                 raise AssertionError("Moonlight backend selected without console.moonlight config")
+            available_apps = self._moonlight_list_apps()
+            if not self._moonlight_app_is_available(available_apps):
+                raise RuntimeValidationError(
+                    "Configured Moonlight app is not available on "
+                    f"{moonlight.host_authority}: {moonlight.app}"
+                )
 
             self.console_logger.info(
                 "Prepared Moonlight launch for VM %s with backend=moonlight app=%s host=%s workspace=%s",

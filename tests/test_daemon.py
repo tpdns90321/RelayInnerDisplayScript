@@ -160,6 +160,30 @@ def moonlight_app_list_csv(*apps: str) -> str:
     return "".join(rows)
 
 
+def write_moonlight_host_settings(
+    state_dir: Path,
+    host: str,
+    *,
+    port: int = 47989,
+    paired: bool = True,
+    section: str = "hosts",
+) -> Path:
+    lines = [
+        f"[{section}]",
+        "size=1",
+        f"1\\hostname={host}",
+        f"1\\manualaddress={host}",
+        f"1\\manualport={port}",
+    ]
+    if paired:
+        lines.append("1\\srvcert=@ByteArray(dummy-cert)")
+
+    settings_path = state_dir / "Moonlight.ini"
+    state_dir.mkdir(parents=True, exist_ok=True)
+    settings_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return settings_path
+
+
 class DisplayDaemonTests(unittest.TestCase):
     def test_running_vm_connects_and_reconnects_after_viewer_exit(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -513,6 +537,7 @@ class DisplayDaemonTests(unittest.TestCase):
                 ),
             ), patch("relayinner_display.daemon.grp.getgrall", return_value=[]):
                 daemon.prepare_runtime()
+                write_moonlight_host_settings(state_dir, "192.168.50.20")
                 daemon.start(now=start_time)
                 daemon.handle_session_message({"type": "session_ready"}, now=start_time)
                 actions = daemon.tick(now=start_time)
@@ -592,6 +617,7 @@ class DisplayDaemonTests(unittest.TestCase):
             start_time = datetime(2026, 4, 4, 0, 0, tzinfo=timezone.utc)
 
             daemon.prepare_runtime()
+            write_moonlight_host_settings(state_dir, "2001:db8::10", port=48010)
             daemon.start(now=start_time)
 
             ready_actions = daemon.handle_session_message({"type": "session_ready"}, now=start_time)
@@ -671,6 +697,7 @@ class DisplayDaemonTests(unittest.TestCase):
             start_time = datetime(2026, 4, 7, 0, 0, tzinfo=timezone.utc)
 
             daemon.prepare_runtime()
+            write_moonlight_host_settings(state_dir, "192.168.50.20")
             daemon.start(now=start_time)
             daemon.handle_session_message({"type": "session_ready"}, now=start_time)
 
@@ -738,8 +765,6 @@ class DisplayDaemonTests(unittest.TestCase):
                 moonlight_commands.append((command, cwd))
                 if command == ["/usr/bin/moonlight", "--version"]:
                     return SimpleNamespace(returncode=0, stdout="Moonlight 6.1.0\n", stderr="")
-                if command == ["/usr/bin/moonlight", "list", "192.168.50.20", "--csv"]:
-                    return SimpleNamespace(returncode=1, stdout="", stderr="not paired")
                 raise AssertionError(f"Unexpected Moonlight command: {command}")
 
             def fake_probe(host: str, port: int, timeout_s: float) -> None:
@@ -778,7 +803,6 @@ class DisplayDaemonTests(unittest.TestCase):
             moonlight_commands,
             [
                 (["/usr/bin/moonlight", "--version"], None),
-                (["/usr/bin/moonlight", "list", "192.168.50.20", "--csv"], str(state_dir)),
             ],
         )
         self.assertEqual(daemon.state.session_state, SessionState.WAITING_FOR_PAIRING)
@@ -798,7 +822,7 @@ class DisplayDaemonTests(unittest.TestCase):
                 backend="moonlight",
                 moonlight_state_dir=state_dir,
             )
-            list_results = iter([1, 0])
+            list_results = iter([0])
             moonlight_commands: list[tuple[list[str], str | None]] = []
 
             def fake_command_runner(
@@ -840,6 +864,7 @@ class DisplayDaemonTests(unittest.TestCase):
                 {"type": "console_started", "backend": "moonlight", "pid": 9004},
                 now=start_time + timedelta(seconds=1),
             )
+            write_moonlight_host_settings(state_dir, "192.168.50.20")
             second_actions = daemon.tick(now=start_time + timedelta(seconds=2))
 
         self.assertEqual(
@@ -881,7 +906,6 @@ class DisplayDaemonTests(unittest.TestCase):
             [
                 (["/usr/bin/moonlight", "--version"], None),
                 (["/usr/bin/moonlight", "list", "192.168.50.20", "--csv"], str(state_dir)),
-                (["/usr/bin/moonlight", "list", "192.168.50.20", "--csv"], str(state_dir)),
             ],
         )
 
@@ -906,8 +930,6 @@ class DisplayDaemonTests(unittest.TestCase):
                 moonlight_commands.append((command, cwd))
                 if command == ["/usr/bin/moonlight", "--version"]:
                     return SimpleNamespace(returncode=0, stdout="Moonlight 6.1.0\n", stderr="")
-                if command == ["/usr/bin/moonlight", "list", "192.168.50.20", "--csv"]:
-                    return SimpleNamespace(returncode=1, stdout="", stderr="")
                 raise AssertionError(f"Unexpected Moonlight command: {command}")
 
             daemon = DisplayDaemon(
@@ -972,8 +994,6 @@ class DisplayDaemonTests(unittest.TestCase):
             moonlight_commands,
             [
                 (["/usr/bin/moonlight", "--version"], None),
-                (["/usr/bin/moonlight", "list", "192.168.50.20", "--csv"], str(state_dir)),
-                (["/usr/bin/moonlight", "list", "192.168.50.20", "--csv"], str(state_dir)),
             ],
         )
 
@@ -1051,6 +1071,7 @@ class DisplayDaemonTests(unittest.TestCase):
             start_time = datetime(2026, 4, 7, 0, 0, tzinfo=timezone.utc)
 
             daemon.prepare_runtime()
+            write_moonlight_host_settings(state_dir, "192.168.50.20")
             daemon.start(now=start_time)
             daemon.handle_session_message({"type": "session_ready"}, now=start_time)
             actions = daemon.tick(now=start_time)
@@ -1102,6 +1123,7 @@ class DisplayDaemonTests(unittest.TestCase):
             start_time = datetime(2026, 4, 7, 0, 0, tzinfo=timezone.utc)
 
             daemon.prepare_runtime()
+            write_moonlight_host_settings(state_dir, "192.168.50.20")
             daemon.start(now=start_time)
             daemon.handle_session_message({"type": "session_ready"}, now=start_time)
             actions = daemon.tick(now=start_time)
@@ -1152,6 +1174,7 @@ class DisplayDaemonTests(unittest.TestCase):
             start_time = datetime(2026, 4, 7, 0, 0, tzinfo=timezone.utc)
 
             daemon.prepare_runtime()
+            write_moonlight_host_settings(state_dir, "192.168.50.20")
             daemon.start(now=start_time)
             daemon.handle_session_message({"type": "session_ready"}, now=start_time)
             actions = daemon.tick(now=start_time)
@@ -1185,8 +1208,6 @@ class DisplayDaemonTests(unittest.TestCase):
             ) -> SimpleNamespace:
                 if command == ["/usr/bin/moonlight", "--version"]:
                     return SimpleNamespace(returncode=0, stdout="Moonlight 6.1.0\n", stderr="")
-                if command == ["/usr/bin/moonlight", "list", "192.168.50.20", "--csv"]:
-                    return SimpleNamespace(returncode=1, stdout="", stderr="")
                 raise AssertionError(f"Unexpected Moonlight command: {command}")
 
             daemon = DisplayDaemon(
@@ -1232,8 +1253,6 @@ class DisplayDaemonTests(unittest.TestCase):
             ) -> SimpleNamespace:
                 if command == ["/usr/bin/moonlight", "--version"]:
                     return SimpleNamespace(returncode=0, stdout="Moonlight 6.1.0\n", stderr="")
-                if command == ["/usr/bin/moonlight", "list", "192.168.50.20", "--csv"]:
-                    return SimpleNamespace(returncode=1, stdout="", stderr="")
                 raise AssertionError(f"Unexpected Moonlight command: {command}")
 
             def fake_probe(host: str, port: int, timeout_s: float) -> None:
