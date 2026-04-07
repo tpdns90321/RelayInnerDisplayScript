@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import redirect_stdout
 from contextlib import redirect_stderr
 from io import StringIO
 from pathlib import Path
@@ -11,6 +12,7 @@ from unittest.mock import patch
 from relayinner_display.kiosk_launcher import (
     build_cage_command,
     build_sway_command,
+    detect_connected_drm_outputs,
     main,
 )
 
@@ -120,6 +122,20 @@ class KioskLauncherTests(unittest.TestCase):
             {"LIBSEAT_BACKEND": "seatd", "PATH": "/usr/bin"},
         )
 
+    def test_detect_connected_drm_outputs_reads_connected_connectors(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            connected = root / "card0-HDMI-A-1"
+            connected.mkdir()
+            (connected / "status").write_text("connected\n", encoding="utf-8")
+            disconnected = root / "card0-DP-1"
+            disconnected.mkdir()
+            (disconnected / "status").write_text("disconnected\n", encoding="utf-8")
+
+            outputs = detect_connected_drm_outputs(root)
+
+        self.assertEqual(outputs, {"HDMI-A-1"})
+
     def test_main_writes_sway_config_and_execs_sway_for_moonlight_auto(self) -> None:
         captured: dict[str, object] = {}
 
@@ -145,19 +161,25 @@ class KioskLauncherTests(unittest.TestCase):
                 },
                 clear=True,
             ):
-                result = main(
-                    [
-                        "--config",
-                        str(config_path),
-                        "--entrypoint-path",
-                        "/opt/relay/session-entrypoint",
-                        "--sway-config-path",
-                        str(sway_config_path),
-                    ],
-                    execvpe=fake_exec,
-                )
+                stdout = StringIO()
+                with patch(
+                    "relayinner_display.kiosk_launcher.detect_connected_drm_outputs",
+                    return_value={"HDMI-A-1"},
+                ), redirect_stdout(stdout):
+                    result = main(
+                        [
+                            "--config",
+                            str(config_path),
+                            "--entrypoint-path",
+                            "/opt/relay/session-entrypoint",
+                            "--sway-config-path",
+                            str(sway_config_path),
+                        ],
+                        execvpe=fake_exec,
+                    )
 
             sway_config = sway_config_path.read_text(encoding="utf-8")
+            sway_config_mode = sway_config_path.stat().st_mode & 0o777
 
         self.assertEqual(result, 0)
         self.assertEqual(captured["program"], "sway")
@@ -173,11 +195,81 @@ class KioskLauncherTests(unittest.TestCase):
                 "PATH": "/usr/bin",
             },
         )
+        self.assertEqual(sway_config_mode, 0o600)
         self.assertIn("workspace 1 output HDMI-A-1", sway_config)
         self.assertIn(
             f"exec /opt/relay/session-entrypoint --config {config_path}",
             sway_config,
         )
+        self.assertNotIn("bar", sway_config)
+        self.assertNotIn("bindsym", sway_config)
+        self.assertNotIn("include", sway_config)
+        self.assertIn("requested output pin for workspace 1 on HDMI-A-1", stdout.getvalue())
+
+    def test_main_omits_workspace_pin_when_output_name_is_empty(self) -> None:
+        captured: dict[str, object] = {}
+
+        def fake_exec(program: str, argv: list[str], env: dict[str, str]) -> None:
+            captured["program"] = program
+            captured["argv"] = argv
+            captured["env"] = env
+
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            config_path = write_config(root, backend="moonlight")
+            sway_config_path = root / "run" / "sway.config"
+            result = main(
+                [
+                    "--config",
+                    str(config_path),
+                    "--sway-config-path",
+                    str(sway_config_path),
+                ],
+                execvpe=fake_exec,
+            )
+            sway_config = sway_config_path.read_text(encoding="utf-8")
+
+        self.assertEqual(result, 0)
+        self.assertEqual(captured["argv"], ["sway", "--config", str(sway_config_path)])
+        self.assertNotIn("workspace 1 output", sway_config)
+
+    def test_main_warns_and_skips_workspace_pin_for_unavailable_output(self) -> None:
+        captured: dict[str, object] = {}
+
+        def fake_exec(program: str, argv: list[str], env: dict[str, str]) -> None:
+            captured["program"] = program
+            captured["argv"] = argv
+            captured["env"] = env
+
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            config_path = write_config(
+                root,
+                backend="moonlight",
+                display_output_name="HDMI-A-1",
+            )
+            sway_config_path = root / "run" / "sway.config"
+            stdout = StringIO()
+            with patch(
+                "relayinner_display.kiosk_launcher.detect_connected_drm_outputs",
+                return_value={"DP-1"},
+            ), redirect_stdout(stdout):
+                result = main(
+                    [
+                        "--config",
+                        str(config_path),
+                        "--sway-config-path",
+                        str(sway_config_path),
+                    ],
+                    execvpe=fake_exec,
+                )
+            sway_config = sway_config_path.read_text(encoding="utf-8")
+
+        self.assertEqual(result, 0)
+        self.assertEqual(captured["program"], "sway")
+        self.assertNotIn("workspace 1 output HDMI-A-1", sway_config)
+        self.assertIn("requested output pin for workspace 1 on HDMI-A-1", stdout.getvalue())
+        self.assertIn("WARNING: requested output pin for HDMI-A-1 is unavailable", stdout.getvalue())
 
     def test_main_rejects_invalid_config_combination(self) -> None:
         with TemporaryDirectory() as temp_dir:

@@ -15,6 +15,8 @@ import subprocess
 import sys
 import textwrap
 
+from .config import ConfigError, build_fallback_config, load_config
+
 
 SERVICE_USER = "relayinner-display"
 SERVICE_GROUP = "relayinner-display"
@@ -26,12 +28,14 @@ DEFAULT_STAGE_ROOT = Path("/")
 REQUIRED_PACKAGES = (
     "python3",
     "python3-evdev",
-    "cage",
     "seatd",
-    "sway",
     "virt-viewer",
     "wlr-randr",
 )
+REQUIRED_COMPOSITOR_PACKAGES = {
+    "cage": ("cage",),
+    "sway": ("sway",),
+}
 REQUIRED_SERVICES = (
     "relayinner-display-seatd.service",
     "relayinner-display-kiosk.service",
@@ -247,6 +251,8 @@ def render_sample_config() -> str:
         # case-insensitively, and reconnects if Moonlight exits unexpectedly while the
         # VM remains running. With kiosk.compositor = "auto", Moonlight resolves to
         # the sway kiosk path while spice, vnc, and looking-glass keep the cage path.
+        # The managed sway runtime writes /run/relayinner-display/sway.config on each
+        # kiosk start; treat that file as generated runtime state, not operator config.
         #
         # [console.moonlight]
         # binary = "moonlight"
@@ -413,6 +419,13 @@ def render_seatd_service() -> str:
     )
 
 
+def required_packages_for_kiosk_compositor(kiosk_compositor: str) -> tuple[str, ...]:
+    compositor_packages = REQUIRED_COMPOSITOR_PACKAGES.get(kiosk_compositor)
+    if compositor_packages is None:
+        raise BootstrapError(f"Unsupported kiosk compositor for package install: {kiosk_compositor}")
+    return REQUIRED_PACKAGES + compositor_packages
+
+
 class HostBootstrapInstaller:
     def __init__(
         self,
@@ -514,9 +527,10 @@ class HostBootstrapInstaller:
             self.output("Skipping apt package install (--skip-package-install)")
             return
 
+        packages = self.resolve_required_packages()
         self.output("Installing required host packages with apt-get")
         self._run(["apt-get", "update"])
-        self._run(["apt-get", "install", "-y", "--no-install-recommends", *REQUIRED_PACKAGES])
+        self._run(["apt-get", "install", "-y", "--no-install-recommends", *packages])
 
     def ensure_service_user(self) -> bool:
         if self._service_user_exists():
@@ -716,6 +730,42 @@ class HostBootstrapInstaller:
             "After editing the config, run: systemctl restart relayinner-display-seatd.service relayinner-displayd.service relayinner-display-kiosk.service",
             "Reboot once to confirm tty1 comes back directly into the relay kiosk.",
         )
+
+    def resolve_required_packages(self) -> tuple[str, ...]:
+        config_path = self._stage(self.paths.config_path)
+        if not config_path.exists():
+            fallback_config = build_fallback_config()
+            packages = required_packages_for_kiosk_compositor(
+                fallback_config.kiosk.resolved_compositor
+            )
+            self.output(
+                "No existing config at "
+                f"{self.paths.config_path}; using default package set for "
+                f"kiosk_compositor={fallback_config.kiosk.resolved_compositor}"
+            )
+            return packages
+
+        try:
+            config = load_config(config_path)
+        except ConfigError as exc:
+            fallback_config = build_fallback_config()
+            packages = required_packages_for_kiosk_compositor(
+                fallback_config.kiosk.resolved_compositor
+            )
+            self.output(
+                "WARNING: existing config at "
+                f"{self.paths.config_path} is invalid for package resolution ({exc}); "
+                "using default package set for "
+                f"kiosk_compositor={fallback_config.kiosk.resolved_compositor}"
+            )
+            return packages
+
+        packages = required_packages_for_kiosk_compositor(config.kiosk.resolved_compositor)
+        self.output(
+            "Resolved required packages from "
+            f"{self.paths.config_path} with kiosk_compositor={config.kiosk.resolved_compositor}"
+        )
+        return packages
 
     def _service_user_exists(self) -> bool:
         return self.service_user_exists_checker(SERVICE_USER)

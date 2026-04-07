@@ -50,6 +50,8 @@ vv_path = "/run/relayinner-display/console/spice-current.vv"
 # case-insensitively, and reconnects if Moonlight exits unexpectedly while the
 # VM remains running. With kiosk.compositor = "auto", Moonlight resolves to
 # the sway kiosk path while spice, vnc, and looking-glass keep the cage path.
+# The managed sway runtime writes /run/relayinner-display/sway.config on each
+# kiosk start; treat that file as generated runtime state, not operator config.
 #
 # [console.moonlight]
 # binary = "moonlight"

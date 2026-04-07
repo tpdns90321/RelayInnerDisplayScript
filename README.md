@@ -6,7 +6,7 @@ The target outcome is a small appliance-like runtime that takes one VM managed b
 
 ## Status
 
-This repository now includes Specs 10 through 17 of the current MVP plan, Specs 20 through 22 for the implemented console-backend expansion series, Specs 30 through 32 for the completed Moonlight client slice, Spec 40 for the first Moonlight runtime hardening follow-up, Spec 50 for the implemented kiosk compositor-selection contract, and Specs 51 through 52 for the remaining managed sway and Moonlight-on-sway follow-up series.
+This repository now includes Specs 10 through 17 of the current MVP plan, Specs 20 through 22 for the implemented console-backend expansion series, Specs 30 through 32 for the completed Moonlight client slice, Spec 40 for the first Moonlight runtime hardening follow-up, Specs 50 through 51 for the implemented kiosk compositor-selection and managed sway runtime contracts, and Spec 52 for the remaining Moonlight-on-sway support-matrix follow-up.
 
 - The MVP architecture and behavior are defined in `./specs`.
 - Spec 10 now has a Python implementation for config loading, daemon/session IPC, local Proxmox command wrappers, SPICE `.vv` generation, and reconnect state handling.
@@ -25,7 +25,8 @@ This repository now includes Specs 10 through 17 of the current MVP plan, Specs 
 - Spec 32 now completes the Moonlight path with paired-workspace Desktop launch fallback, live non-Desktop app-list validation, `--quit-after` launch rules, reconnect recovery, `moonlight_app` runtime metadata, and operator-facing ops documentation.
 - Spec 40 now formalizes the follow-up Moonlight hardening contract: workspace-derived pair completion, paired `Desktop` fast-path launch, and preserved pair state across non-Desktop app-validation degradation.
 - Spec 50 now adds the kiosk compositor-selection contract: `[kiosk].compositor`, backend-specific auto resolution, early backend/compositor validation, a relay-managed kiosk launcher, and `kiosk_compositor` in runtime diagnostics.
-- Specs 51 through 52 remain the next Wave 5 follow-up for the managed sway runtime and the Moonlight-on-sway support matrix.
+- Spec 51 now adds the managed sway kiosk runtime: a generated `/run/relayinner-display/sway.config`, output-aware workspace pinning, startup warnings for unavailable pinned outputs, and compositor-specific package selection during install.
+- Spec 52 remains the next Wave 5 follow-up for the Moonlight-on-sway support matrix and operator guidance.
 - The current design still assumes direct installation on a Proxmox host, not an LXC container.
 
 ## Quickstart
@@ -59,7 +60,11 @@ sudo cat /var/lib/relayinner-display/install-state.json
 
 For the full operator procedure, package assumptions, managed paths, troubleshooting commands, and installer flag details, see [`./docs/proxmox-host-setup.md`](./docs/proxmox-host-setup.md).
 
+If you later change the resolved kiosk compositor from the default `cage` path to `sway`, rerun `sudo ./install.sh` or install `sway` yourself before restarting the services. The installer now selects host compositor packages from the current config instead of always installing both paths.
+
 When `console_backend = "moonlight"` and the Sunshine host is reachable but not yet paired, the kiosk now enters `waiting_for_pairing`, launches Moonlight's pairing UI fullscreen with a 4-digit PIN, and resumes automatically after you approve that PIN in the Sunshine web UI `PIN` page on the guest. The daemon keeps polling pairing completion while that pairing UI is still open by watching the managed Moonlight workspace for the paired-host record that Moonlight persists on success, so a successful approval advances into the configured stream without requiring a manual kiosk click or a service restart. The active PIN is also mirrored in `/run/relayinner-display/daemon.state.json` while approval is pending. Once paired, the daemon launches `Desktop` directly from that paired workspace state and only runs `moonlight list --csv` for non-`Desktop` apps that need catalog validation. Daemon-side Moonlight helper checks now run with a headless Qt platform so they do not try to grab DRM/KMS outside the kiosk session, and they still honor `[policy].command_timeout_s` as a final guardrail. This relay slice does not store Sunshine usernames or passwords. The runtime now also records the resolved kiosk compositor in `kiosk_compositor`, so `moonlight + auto` is visible as `sway` while `spice|vnc|looking-glass + auto` stay visible as `cage`.
+
+On the managed `sway` path, the kiosk launcher now writes `/run/relayinner-display/sway.config` on each kiosk start, uses that generated file to launch `sway --config ...`, and does not load user or system sway config. If `[display].output_name` is set, the launcher pins workspace `1` only when that connector is currently visible under `/sys/class/drm`; otherwise it logs a warning and lets sway fall back to ordinary output selection instead of failing startup.
 
 If the kiosk journal shows `libseat` errors such as `Could not connect to socket /run/seatd.sock: Permission denied`, `Could not open target tty: Permission denied`, or `Failed to start a DRM session`, refresh the installed units with `sudo ./install.sh` before debugging further. The current kiosk unit is expected to launch `/usr/local/lib/relayinner-display/relayinner-display-kiosk` while `relayinner-display-seatd.service` owns `/run/seatd.sock`; older installs that still embed `cage -- /usr/local/lib/relayinner-display/session-entrypoint` directly can drift from the current compositor-selection contract.
 
@@ -123,7 +128,7 @@ The current MVP design assumes:
 - Proxmox host direct install
 - Python scripts plus systemd services
 - `relayinner-displayd` as the root-owned control daemon
-- `relayinner-display-session` as the Cage session supervisor
+- `relayinner-display-session` as the kiosk session supervisor inside the resolved compositor
 - local IPC over a Unix socket in `/run/relayinner-display/`
 - persistent config in `/etc/relayinner-display/config.toml`
 
@@ -134,10 +139,10 @@ Current implementation coverage:
 - `relayinner_display.daemon` now owns the end-to-end appliance state machine, validates required runtime binaries, emits backend-neutral `connect_console` IPC, prepares SPICE, VNC, Looking Glass, or Moonlight console launches, runs Looking Glass shared-memory preflight, prepares the managed Moonlight workspace with `portable.dat`, reuses the relay session's HOME and XDG runtime context for daemon-side Moonlight helper commands, enforces `moonlight-qt >= 6.0.0`, probes Moonlight host reachability, reads paired-host state from the persistent Moonlight workspace, launches Moonlight's own pairing UI inside the kiosk session with a relay-generated PIN when the host is unpaired, skips daemon-side app-list validation for paired `Desktop` streams while keeping live CSV validation for other Moonlight apps, re-enters reconnect flow after unexpected Moonlight exits, preserves paired-host state across non-pairing degraded paths, exposes `waiting_for_pairing`, `moonlight_app`, and `kiosk_compositor` runtime metadata, degrades after repeated local Proxmox failures, captures host power-button intent, and writes the expanded runtime state contract to disk.
 - `relayinner_display.input` validates host `logind` power-key policy and captures `KEY_POWER` presses from one evdev node.
 - `relayinner_display.session` now validates backend/launcher allowlists for generic console launches, keeps legacy `connect_spice` compatibility during the transition window, tracks waiting/degraded/display-sleeping plus `waiting_for_pairing` session state, accepts daemon-provided waiting `details` for pair-assist instructions, launches `looking-glass-client`, Moonlight's pairing UI, or Moonlight streaming on the same curated contract as `remote-viewer`, honors daemon-provided working directories for managed backends, emits backend-tagged `console_exited` events for reconnect handling, applies Wayland display-power actions through `wlr-randr` by default while preserving custom helper support, and emits subsystem-scoped session, console, and display logs.
-- `relayinner_display.kiosk_launcher` now provides the relay-managed kiosk launcher that resolves the configured compositor to `cage` or `sway` without a shell wrapper.
+- `relayinner_display.kiosk_launcher` now provides the relay-managed kiosk launcher that resolves the configured compositor to `cage` or `sway` without a shell wrapper, writes a generated minimal `/run/relayinner-display/sway.config` for the managed sway path, and warns while falling back gracefully if an explicit sway output pin is unavailable at startup.
 - `relayinner_display.kiosk` keeps the installed session entrypoint that launches the session supervisor by absolute path inside the selected compositor.
-- `relayinner_display.bootstrap` renders the sample config, systemd units, logind override, host-detected DRM supplementary groups for the kiosk unit, the Spec 15 `StartLimitIntervalSec=120` / `StartLimitBurst=5` restart-loop policy, the Spec 16 install-state record under `/var/lib/relayinner-display/install-state.json`, the Spec 22 Looking Glass sample config hints, the Spec 30 and 32 Moonlight sample config hints, and the Spec 17 uninstall flow that restores `tty1` plus optional display-manager state conservatively.
-- `tests/` now cover config parsing, backend-neutral IPC validation including `cwd` and waiting `details`, Proxmox command handling, SPICE, VNC, Looking Glass, and Moonlight launch/reconnect logic, Moonlight pair-assist polling and PIN renewal, Desktop fast-path versus non-Desktop live Moonlight app-list validation, daemon DPMS debounce behavior, Moonlight workspace/version validation, runtime-state/backend handling including `kiosk_compositor`, `vnc_endpoint`, `looking_glass_shm_file`, `moonlight_app`, and Moonlight pairing metadata, runtime dependency degradation, restart-threshold rendering, install-state persistence, uninstall fallback and purge behavior, session supervision, logind policy parsing, power-button handling, display-power handling, and kiosk launcher plus entrypoint wiring.
+- `relayinner_display.bootstrap` renders the sample config, systemd units, logind override, host-detected DRM supplementary groups for the kiosk unit, compositor-specific host package requirements based on the current config, the Spec 15 `StartLimitIntervalSec=120` / `StartLimitBurst=5` restart-loop policy, the Spec 16 install-state record under `/var/lib/relayinner-display/install-state.json`, the Spec 22 Looking Glass sample config hints, the Spec 30 and 32 Moonlight sample config hints, and the Spec 17 uninstall flow that restores `tty1` plus optional display-manager state conservatively.
+- `tests/` now cover config parsing, backend-neutral IPC validation including `cwd` and waiting `details`, Proxmox command handling, SPICE, VNC, Looking Glass, and Moonlight launch/reconnect logic, Moonlight pair-assist polling and PIN renewal, Desktop fast-path versus non-Desktop live Moonlight app-list validation, daemon DPMS debounce behavior, Moonlight workspace/version validation, runtime-state/backend handling including `kiosk_compositor`, `vnc_endpoint`, `looking_glass_shm_file`, `moonlight_app`, and Moonlight pairing metadata, runtime dependency degradation, restart-threshold rendering, install-state persistence, uninstall fallback and purge behavior, session supervision, logind policy parsing, power-button handling, display-power handling, managed sway config generation, compositor-specific package selection, and kiosk launcher plus entrypoint wiring.
 
 Operationally, the appliance is expected to move through a small state machine:
 
@@ -198,7 +203,7 @@ Console-backend expansion status:
 - Wave 2 is complete: Spec 21 now owns the shipped VNC path, and Spec 22 now ships the preflight-only Looking Glass path on the same shared contract.
 - Wave 3 is complete: Specs 30 through 32 now ship the Moonlight backend contract, persistent pairing workspace, live app-list validation, fullscreen stream launch, and reconnect behavior for Sunshine-backed guests.
 - Wave 4 is complete: Spec 40 hardens the Moonlight runtime by treating paired `Desktop` launch separately from non-`Desktop` app-list validation.
-- Wave 5 is in progress: Spec 50 now ships the compositor-selection contract, and Specs 51 through 52 remain for the managed sway runtime follow-up and the Moonlight-on-sway support matrix.
+- Wave 5 is in progress: Specs 50 through 51 now ship the compositor-selection and managed sway runtime contracts, and Spec 52 remains for the Moonlight-on-sway support matrix.
 
 ## Expected Host Dependencies
 
@@ -206,15 +211,17 @@ The MVP spec currently assumes these host-side packages or equivalents:
 
 - `python3`
 - `python3-evdev`
-- `cage`
 - `seatd`
-- `sway`
 - `virt-viewer`
 - `wlr-randr`
+- `cage` when the resolved kiosk compositor is `cage` (the default SPICE, VNC, and Looking Glass path)
+- `sway` when the resolved kiosk compositor is `sway` (the default Moonlight path under `[kiosk].compositor = "auto"`)
 
 When `console_backend = "looking-glass"`, operators also need a working `looking-glass-client` install plus the upstream guest/passthrough prerequisites described at <https://looking-glass.io/docs/stable/requirements/> and <https://looking-glass.io/docs/stable/install_client/>. The relay does not automate those steps.
 
-When `console_backend = "moonlight"`, operators also need Linux `moonlight-qt` version `6.0.0` or newer plus a guest that already runs Sunshine. Under the Spec 50 default `[kiosk].compositor = "auto"` contract, Moonlight now resolves to the `sway` kiosk path while the other backends stay on `cage`. The relay prepares the managed Moonlight workspace, keeps paired-host state there across restarts, reads that workspace state to determine whether this relay instance is already paired, launches paired `Desktop` streams directly from that state, validates non-`Desktop` app names from live `moonlight list --csv` output before each launch, launches Moonlight's own pairing UI with a relay-generated PIN when the host is not yet paired, and drives approval through the Sunshine web UI `PIN` page, but it still does not automate Sunshine setup or store Sunshine usernames or passwords.
+When `console_backend = "moonlight"`, operators also need Linux `moonlight-qt` version `6.0.0` or newer plus a guest that already runs Sunshine. Under the default `[kiosk].compositor = "auto"` contract, Moonlight now resolves to the managed `sway` kiosk path while the other backends stay on `cage`. The relay prepares the managed Moonlight workspace, keeps paired-host state there across restarts, reads that workspace state to determine whether this relay instance is already paired, launches paired `Desktop` streams directly from that state, validates non-`Desktop` app names from live `moonlight list --csv` output before each launch, launches Moonlight's own pairing UI with a relay-generated PIN when the host is not yet paired, and drives approval through the Sunshine web UI `PIN` page, writes `/run/relayinner-display/sway.config` as runtime-only managed sway state, and still does not automate Sunshine setup or store Sunshine usernames or passwords.
+
+If you convert an existing install from a `cage`-resolved config to this managed `sway` path, rerun `sudo ./install.sh` first so the host package set picks up `sway` for the resolved compositor.
 
 The current implementation now manages:
 
@@ -223,6 +230,7 @@ The current implementation now manages:
 - a `logind` override for host power-button behavior
 - an install-state record under `/var/lib/relayinner-display/install-state.json`
 - runtime state under `/run/relayinner-display/`
+- a generated `/run/relayinner-display/sway.config` when the resolved kiosk compositor is `sway`
 - subsystem-scoped journald observability for `proxmox`, `session`, `console`, `display`, and `input`
 - restart-loop thresholds of 5 failures within 2 minutes for the managed systemd units
 - a checked-in sample config and host setup guide

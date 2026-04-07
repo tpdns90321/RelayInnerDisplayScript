@@ -15,6 +15,7 @@ DEFAULT_CAGE_BINARY = "cage"
 DEFAULT_SWAY_BINARY = "sway"
 DEFAULT_ENTRYPOINT_PATH = "/usr/local/lib/relayinner-display/session-entrypoint"
 DEFAULT_SWAY_CONFIG_PATH = Path("/run/relayinner-display/sway.config")
+DEFAULT_SYS_CLASS_DRM_PATH = Path("/sys/class/drm")
 
 
 ExecFunction = Callable[[str, list[str], dict[str, str]], None]
@@ -65,24 +66,69 @@ def render_sway_config(
     return "\n".join(lines) + "\n"
 
 
+def detect_connected_drm_outputs(
+    sys_class_drm_path: Path = DEFAULT_SYS_CLASS_DRM_PATH,
+) -> set[str] | None:
+    status_paths = sorted(sys_class_drm_path.glob("card*-*/status"))
+    if not status_paths:
+        return None
+
+    outputs: set[str] = set()
+    for status_path in status_paths:
+        try:
+            status = status_path.read_text(encoding="utf-8").strip().casefold()
+        except OSError:
+            continue
+
+        if status != "connected":
+            continue
+
+        connector_name = status_path.parent.name.partition("-")[2]
+        if connector_name:
+            outputs.add(connector_name)
+
+    return outputs
+
+
+def resolve_sway_output_name(
+    output_name: str,
+    connected_outputs: set[str] | None,
+) -> tuple[str, str | None]:
+    requested_output = output_name.strip()
+    if not requested_output:
+        return "", None
+    if connected_outputs is None or requested_output in connected_outputs:
+        return requested_output, None
+    return (
+        "",
+        "requested output pin for "
+        f"{requested_output} is unavailable at sway startup; continuing without workspace pin",
+    )
+
+
 def write_sway_config(
     config: AppConfig,
     config_path: Path,
     *,
     sway_config_path: Path = DEFAULT_SWAY_CONFIG_PATH,
     entrypoint_path: str = DEFAULT_ENTRYPOINT_PATH,
-) -> Path:
+    connected_outputs: set[str] | None = None,
+) -> tuple[Path, str | None]:
+    output_name, output_warning = resolve_sway_output_name(
+        config.display.output_name,
+        connected_outputs,
+    )
     sway_config_path.parent.mkdir(parents=True, exist_ok=True)
     sway_config_path.write_text(
         render_sway_config(
             config_path,
             entrypoint_path=entrypoint_path,
-            output_name=config.display.output_name,
+            output_name=output_name,
         ),
         encoding="utf-8",
     )
     os.chmod(sway_config_path, 0o600)
-    return sway_config_path
+    return sway_config_path, output_warning
 
 
 def build_parser() -> ArgumentParser:
@@ -116,11 +162,15 @@ def main(argv: list[str] | None = None, execvpe: ExecFunction = os.execvpe) -> i
     )
 
     if config.kiosk.resolved_compositor == "sway":
-        sway_config_path = write_sway_config(
+        connected_outputs = None
+        if config.display.output_name:
+            connected_outputs = detect_connected_drm_outputs()
+        sway_config_path, output_warning = write_sway_config(
             config,
             args.config,
             sway_config_path=args.sway_config_path,
             entrypoint_path=args.entrypoint_path,
+            connected_outputs=connected_outputs,
         )
         print(f"relayinner-display-kiosk: wrote {sway_config_path}")
         if config.display.output_name:
@@ -128,6 +178,8 @@ def main(argv: list[str] | None = None, execvpe: ExecFunction = os.execvpe) -> i
                 "relayinner-display-kiosk: "
                 f"requested output pin for workspace 1 on {config.display.output_name}"
             )
+        if output_warning is not None:
+            print(f"relayinner-display-kiosk: WARNING: {output_warning}")
 
     command = build_kiosk_command(
         config,

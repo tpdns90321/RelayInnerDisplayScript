@@ -10,11 +10,11 @@ This MVP supports one deployment path: direct installation onto a Proxmox VE hos
 - Package sources that can install:
   - `python3`
   - `python3-evdev`
-  - `cage`
   - `seatd`
-  - `sway`
   - `virt-viewer`
   - `wlr-randr`
+  - `cage` when the resolved kiosk compositor is `cage`
+  - `sway` when the resolved kiosk compositor is `sway`
 
 When `console_backend = "moonlight"`, operators also need Linux `moonlight-qt` version `6.0.0` or newer. The installer does not add that package for you.
 
@@ -30,7 +30,7 @@ When `console_backend = "moonlight"`, operators also need Linux `moonlight-qt` v
    - `[console.vnc].display_number` plus matching VM `args: -vnc 127.0.0.1:<display_number>` when using `console_backend = "vnc"`
    - `[console.looking_glass].shm_file` plus any renderer or SPICE overrides when using `console_backend = "looking-glass"`
    - `[console.moonlight].host` plus any non-default `app`, `base_port`, or `state_dir` when using `console_backend = "moonlight"`
-   - `[display].output_name` if you want to pin a specific connector name; this is recommended when the default `wlr-randr` helper should target one physical connector only
+   - `[display].output_name` if you want to pin a specific connector name; on the managed sway path this also pins workspace `1` to that connector when it is currently connected
    - `[input].power_button_event` if the default evdev path does not match the host
 4. Start the services after editing the config:
 
@@ -46,6 +46,8 @@ Installer flags:
 - `./install.sh --replace-config` backs up the existing `/etc/relayinner-display/config.toml` and replaces it with the sample config.
 
 Successful installer runs also rewrite `/var/lib/relayinner-display/install-state.json`. Re-running without `--replace-config` preserves the current config and records `config_state.action=preserved`; re-running with `--replace-config` records `config_state.action=replaced` plus the backup path created during that run.
+
+The installer now selects compositor packages from the current config. If you later switch the resolved kiosk compositor from `cage` to `sway`, rerun `sudo ./install.sh` or install `sway` yourself before restarting the services.
 
 ## VNC Backend
 
@@ -101,7 +103,7 @@ For the required host and guest preparation, follow the upstream documentation:
 
 ## Moonlight Backend
 
-Use `console_backend = "moonlight"` only after the guest already runs Sunshine and the Proxmox host already has Linux `moonlight-qt` version `6.0.0` or newer. Specs 30 through 32 plus Spec 50 cover the backend contract, persistent workspace, PIN-assist pairing, live app validation, direct `moonlight stream` launch, reconnect behavior, and compositor selection:
+Use `console_backend = "moonlight"` only after the guest already runs Sunshine and the Proxmox host already has Linux `moonlight-qt` version `6.0.0` or newer. Specs 30 through 32 plus Specs 50 through 51 cover the backend contract, persistent workspace, PIN-assist pairing, live app validation, direct `moonlight stream` launch, reconnect behavior, compositor selection, and the managed sway runtime:
 
 - the installer does not configure Sunshine inside the guest
 - the relay does not store Sunshine usernames or passwords
@@ -125,7 +127,11 @@ state_dir = "/var/lib/relayinner-display/moonlight"
 quit_app_after_session = false
 ```
 
-With `compositor = "auto"`, the relay resolves Moonlight to the `sway` kiosk path. The other backends still resolve to `cage` unless you override that contract explicitly with a supported combination.
+With `compositor = "auto"`, the relay resolves Moonlight to the managed `sway` kiosk path. The other backends still resolve to `cage` unless you override that contract explicitly with a supported combination.
+
+On that managed sway path, the kiosk launcher writes `/run/relayinner-display/sway.config` on each kiosk start, launches `sway --config /run/relayinner-display/sway.config`, and does not load operator-owned or system sway config files. If `[display].output_name` is set, the launcher adds `workspace 1 output <name>` only when that connector is currently visible under `/sys/class/drm`; otherwise it logs a warning and lets sway continue with ordinary output selection.
+
+If you are enabling Moonlight on an existing relay install that previously resolved to `cage`, rerun `sudo ./install.sh` first so the host package set includes `sway` for the new resolved compositor.
 
 `app` is matched case-insensitively against the live Sunshine app list from `moonlight list --csv` when you target a non-`Desktop` Sunshine entry. `quit_app_after_session = true` is valid only for non-`Desktop` apps; the `Desktop` entry is treated as a stream surface, not a relay-managed launchable program.
 
@@ -199,6 +205,7 @@ test -e /var/lib/relayinner-display/install-state.json && echo "install-state st
 - `/etc/systemd/logind.conf.d/relayinner-display.conf`
 - `/var/lib/relayinner-display/install-state.json`
 - `/run/relayinner-display/`
+- `/run/relayinner-display/sway.config` while the resolved kiosk compositor is `sway`
 
 ## Managed Services
 
@@ -282,6 +289,8 @@ If the kiosk journal shows `failed to open /dev/dri/renderD128: Permission denie
 The managed kiosk unit also exports `LIBSEAT_BACKEND=seatd` so the resolved kiosk compositor uses the same backend as the successful transient `systemd-run` checks instead of depending on libseat backend auto-selection.
 
 If `systemctl status relayinner-display-kiosk.service` briefly shows the child process as `/usr/bin/python3 /usr/local/lib/relayinner-display/session-entrypoint` before `cage` exits with `status=1`, the installed runtime is likely older than the absolute-path launcher hotfix. Refresh `/usr/local/lib/relayinner-display/relayinner_display/kiosk.py` with `sudo ./install.sh`; older copies tried to exec `relayinner-display-session` by bare name, which fails when `cage` does not preserve the kiosk unit `PATH`.
+
+If the kiosk journal warns that a requested output pin is unavailable at sway startup, confirm that `[display].output_name` matches a currently connected DRM connector name such as `HDMI-A-1` or `DP-1`. The managed sway launcher writes the final runtime config to `/run/relayinner-display/sway.config`; when that warning appears it intentionally omits `workspace 1 output ...` so sway falls back to ordinary output selection instead of failing startup.
 
 If `runuser -u relayinner-display -- /usr/local/lib/relayinner-display/session-entrypoint` or the kiosk journal shows `PermissionError: [Errno 13] Permission denied: '/etc/relayinner-display/config.toml'`, the session user cannot read the preserved host config. Refresh the install with `sudo ./install.sh`; the current installer normalizes `/etc/relayinner-display/` to service-group-readable permissions so the unprivileged kiosk session can load the same config as the root daemon.
 

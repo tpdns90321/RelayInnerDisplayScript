@@ -15,6 +15,7 @@ from relayinner_display.bootstrap import (
     HostBootstrapInstaller,
     HostInstallPaths,
     REQUIRED_PACKAGES,
+    REQUIRED_COMPOSITOR_PACKAGES,
     REQUIRED_SERVICES,
     RUNTIME_STATE_DIR,
     SERVICE_USER,
@@ -24,6 +25,7 @@ from relayinner_display.bootstrap import (
     build_installed_kiosk_command,
     build_installed_seatd_command,
     detect_drm_device_groups,
+    required_packages_for_kiosk_compositor,
     render_daemon_service,
     render_kiosk_service,
     render_seatd_service,
@@ -655,8 +657,82 @@ class BootstrapTests(unittest.TestCase):
     def test_required_packages_match_spec(self) -> None:
         self.assertEqual(
             REQUIRED_PACKAGES,
-            ("python3", "python3-evdev", "cage", "seatd", "sway", "virt-viewer", "wlr-randr"),
+            ("python3", "python3-evdev", "seatd", "virt-viewer", "wlr-randr"),
         )
+        self.assertEqual(
+            REQUIRED_COMPOSITOR_PACKAGES,
+            {
+                "cage": ("cage",),
+                "sway": ("sway",),
+            },
+        )
+        self.assertEqual(
+            required_packages_for_kiosk_compositor("cage"),
+            ("python3", "python3-evdev", "seatd", "virt-viewer", "wlr-randr", "cage"),
+        )
+        self.assertEqual(
+            required_packages_for_kiosk_compositor("sway"),
+            ("python3", "python3-evdev", "seatd", "virt-viewer", "wlr-randr", "sway"),
+        )
+
+    def test_install_packages_use_existing_configured_compositor(self) -> None:
+        runner = FakeRunner()
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            config_path = self.stage_path(root, HostInstallPaths().config_path)
+            config_path.parent.mkdir(parents=True, exist_ok=True)
+            config_path.write_text(
+                render_sample_config()
+                .replace('console_backend = "spice"', 'console_backend = "moonlight"')
+                .replace(
+                    '[console.spice]\nvv_path = "/run/relayinner-display/console/spice-current.vv"\n',
+                    '[console.moonlight]\nhost = "192.168.50.20"\n',
+                ),
+                encoding="utf-8",
+            )
+
+            installer = self.make_installer(
+                root=root,
+                runner=runner,
+                output=lambda _: None,
+                service_user_exists=True,
+            )
+            installer.install_packages(skip_package_install=False)
+
+        self.assertIn(["apt-get", "update"], runner.commands)
+        self.assertIn(
+            ["apt-get", "install", "-y", "--no-install-recommends", *required_packages_for_kiosk_compositor("sway")],
+            runner.commands,
+        )
+
+    def test_install_packages_fallback_to_default_when_config_missing_or_invalid(self) -> None:
+        expected_install = [
+            "apt-get",
+            "install",
+            "-y",
+            "--no-install-recommends",
+            *required_packages_for_kiosk_compositor("cage"),
+        ]
+
+        for config_content in (None, "[target]\ninvalid = true\n"):
+            with self.subTest(config_content=config_content):
+                runner = FakeRunner()
+                with TemporaryDirectory() as temp_dir:
+                    root = Path(temp_dir)
+                    config_path = self.stage_path(root, HostInstallPaths().config_path)
+                    if config_content is not None:
+                        config_path.parent.mkdir(parents=True, exist_ok=True)
+                        config_path.write_text(config_content, encoding="utf-8")
+
+                    installer = self.make_installer(
+                        root=root,
+                        runner=runner,
+                        output=lambda _: None,
+                        service_user_exists=True,
+                    )
+                    installer.install_packages(skip_package_install=False)
+
+                self.assertIn(expected_install, runner.commands)
 
 
 if __name__ == "__main__":
