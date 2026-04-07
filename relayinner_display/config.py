@@ -9,6 +9,20 @@ import tomllib
 
 
 SUPPORTED_CONSOLE_BACKENDS = {"spice", "vnc", "looking-glass", "moonlight"}
+SUPPORTED_KIOSK_COMPOSITORS = {"auto", "cage", "sway"}
+DEFAULT_KIOSK_COMPOSITOR = "auto"
+DEFAULT_RESOLVED_KIOSK_COMPOSITOR_BY_BACKEND = {
+    "looking-glass": "cage",
+    "moonlight": "sway",
+    "spice": "cage",
+    "vnc": "cage",
+}
+SUPPORTED_KIOSK_COMPOSITORS_BY_BACKEND = {
+    "looking-glass": {"cage"},
+    "moonlight": {"sway"},
+    "spice": {"cage"},
+    "vnc": {"cage"},
+}
 SUPPORTED_VNC_BIND_HOSTS = {"127.0.0.1", "localhost"}
 SUPPORTED_VNC_VIEWERS = {"remote-viewer"}
 SUPPORTED_LOOKING_GLASS_RENDERERS = {"auto", "egl", "opengl"}
@@ -62,6 +76,12 @@ class RuntimeConfig:
 class DisplayConfig:
     output_name: str = ""
     power_helper: str = "wlr-randr"
+
+
+@dataclass(frozen=True)
+class KioskConfig:
+    compositor: str = DEFAULT_KIOSK_COMPOSITOR
+    resolved_compositor: str = "cage"
 
 
 @dataclass(frozen=True)
@@ -185,6 +205,7 @@ class AppConfig:
     runtime: RuntimeConfig
     policy: PolicyConfig
     display: DisplayConfig = field(default_factory=DisplayConfig)
+    kiosk: KioskConfig = field(default_factory=KioskConfig)
     input: InputConfig = field(default_factory=InputConfig)
     console: ConsoleConfig = field(
         default_factory=lambda: ConsoleConfig(artifact_dir=DEFAULT_CONSOLE_ARTIFACT_DIR),
@@ -222,6 +243,7 @@ def build_fallback_config() -> AppConfig:
             shutdown_timeout_s=90,
         ),
         display=DisplayConfig(),
+        kiosk=KioskConfig(),
         input=InputConfig(forward_power_button=False),
     )
 
@@ -243,6 +265,7 @@ def parse_config(raw: dict[str, Any]) -> AppConfig:
     runtime_table = _require_table(raw, "runtime")
     policy_table = _require_table(raw, "policy")
     display_table = _optional_table(raw, "display")
+    kiosk_table = _optional_table(raw, "kiosk")
     input_table = _optional_table(raw, "input")
     console_table = _optional_table(raw, "console")
 
@@ -293,6 +316,7 @@ def parse_config(raw: dict[str, Any]) -> AppConfig:
         output_name=_optional_string(display_table, "output_name", default=""),
         power_helper=_optional_non_empty_string(display_table, "power_helper", default="wlr-randr"),
     )
+    kiosk = _parse_kiosk_config(target.console_backend, kiosk_table)
 
     input_config = InputConfig(
         power_button_event=_optional_absolute_path(
@@ -361,6 +385,7 @@ def parse_config(raw: dict[str, Any]) -> AppConfig:
         runtime=runtime,
         policy=policy,
         display=display,
+        kiosk=kiosk,
         input=input_config,
         console=console,
     )
@@ -440,6 +465,41 @@ def _optional_absolute_path(table: dict[str, Any], key: str, default: Path) -> P
     if not path.is_absolute():
         raise ConfigError(f"{key!r} must be an absolute path")
     return path
+
+
+def _parse_kiosk_config(backend: str, table: dict[str, Any]) -> KioskConfig:
+    _require_only_keys(table, {"compositor"}, "kiosk")
+
+    compositor = _optional_non_empty_string(
+        table,
+        "compositor",
+        default=DEFAULT_KIOSK_COMPOSITOR,
+    )
+    if compositor not in SUPPORTED_KIOSK_COMPOSITORS:
+        supported = ", ".join(sorted(SUPPORTED_KIOSK_COMPOSITORS))
+        raise ConfigError(
+            f"Unsupported kiosk.compositor={compositor!r}; supported values: {supported}"
+        )
+
+    resolved_compositor = resolve_kiosk_compositor(backend, compositor)
+    return KioskConfig(
+        compositor=compositor,
+        resolved_compositor=resolved_compositor,
+    )
+
+
+def resolve_kiosk_compositor(backend: str, compositor: str) -> str:
+    if compositor == DEFAULT_KIOSK_COMPOSITOR:
+        return DEFAULT_RESOLVED_KIOSK_COMPOSITOR_BY_BACKEND[backend]
+
+    supported = SUPPORTED_KIOSK_COMPOSITORS_BY_BACKEND[backend]
+    if compositor not in supported:
+        supported_values = ", ".join(sorted(supported))
+        raise ConfigError(
+            f"Unsupported kiosk.compositor={compositor!r} for console_backend={backend!r}; "
+            f"supported values for this backend: {supported_values}"
+        )
+    return compositor
 
 
 def _parse_console_config(

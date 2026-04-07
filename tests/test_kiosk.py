@@ -3,20 +3,10 @@ from __future__ import annotations
 from unittest.mock import patch
 import unittest
 
-from relayinner_display.kiosk import build_kiosk_service_command, main
+from relayinner_display.kiosk import main
 
 
 class KioskTests(unittest.TestCase):
-    def test_build_kiosk_service_command_matches_spec(self) -> None:
-        self.assertEqual(
-            build_kiosk_service_command(),
-            [
-                "cage",
-                "--",
-                "/usr/local/lib/relayinner-display/session-entrypoint",
-            ],
-        )
-
     def test_entrypoint_execs_session_with_sanitized_env(self) -> None:
         captured: dict[str, object] = {}
 

@@ -1,6 +1,6 @@
 # RelayInnerDisplayScript Specs
 
-This directory contains the current MVP spec set, the implemented console-backend expansion series, the completed Moonlight client series, and the first Moonlight hardening follow-up for a Proxmox-hosted display relay appliance that mirrors one KVM guest directly onto a host-attached monitor.
+This directory contains the current MVP spec set, the implemented console-backend expansion series, the completed Moonlight client series, the first Moonlight hardening follow-up, and the implemented first Wave 5 compositor-selection contract for a Proxmox-hosted display relay appliance that mirrors one KVM guest directly onto a host-attached monitor.
 
 ## Spec Index
 
@@ -35,7 +35,8 @@ RelayInnerDisplayScript turns a Proxmox host with an attached monitor into a sin
 - Specs 20 through 22 define the current implemented backend expansion so operators can choose SPICE, VNC, or Looking Glass from config today.
 - Specs 30 through 32 define the implemented Moonlight client series for Sunshine-backed guests.
 - Spec 40 captures the first Moonlight runtime hardening follow-up for `Desktop` fast-path launch and pair-state resilience.
-- Specs 50 through 52 define the planned Wave 5 compositor-selection and Moonlight-on-sway follow-up series.
+- Spec 50 now implements the kiosk compositor-selection contract and runtime diagnostics.
+- Specs 51 through 52 remain the follow-up for the managed sway runtime and the Moonlight-on-sway support matrix.
 
 ## Shared Defaults
 
@@ -73,6 +74,7 @@ Current implementation waves for the console-backend expansion:
 - Wave 2: Spec 21 and Spec 22 are now implemented on top of the completed Spec 20 contract.
 - Wave 3: Specs 30 through 32 implement the Moonlight client path for Sunshine-backed guests.
 - Wave 4: Spec 40 hardens the Moonlight runtime by decoupling paired `Desktop` launch from daemon-side app-list availability.
+- Wave 5: Spec 50 now ships the compositor-selection contract; Specs 51 and 52 remain for the managed sway runtime and support-matrix follow-up.
 
 Parallelization rule:
 

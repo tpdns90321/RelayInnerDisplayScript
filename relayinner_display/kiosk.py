@@ -10,7 +10,6 @@ from .session import DEFAULT_CONFIG_PATH, build_session_env
 
 
 DEFAULT_SESSION_BINARY = "/usr/local/lib/relayinner-display/relayinner-display-session"
-DEFAULT_ENTRYPOINT_PATH = "/usr/local/lib/relayinner-display/session-entrypoint"
 
 
 ExecFunction = Callable[[str, list[str], dict[str, str]], None]
@@ -21,10 +20,6 @@ def build_session_entrypoint_command(
     session_binary: str = DEFAULT_SESSION_BINARY,
 ) -> list[str]:
     return [session_binary, "--config", str(config_path)]
-
-
-def build_kiosk_service_command(entrypoint_path: str = DEFAULT_ENTRYPOINT_PATH) -> list[str]:
-    return ["cage", "--", entrypoint_path]
 
 
 def build_parser() -> ArgumentParser:

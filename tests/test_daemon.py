@@ -18,9 +18,11 @@ from relayinner_display.config import (
     ConsoleVncConfig,
     DisplayConfig,
     InputConfig,
+    KioskConfig,
     PolicyConfig,
     RuntimeConfig,
     TargetConfig,
+    resolve_kiosk_compositor,
 )
 from relayinner_display.daemon import DisplayDaemon
 from relayinner_display.input import PowerButtonError
@@ -1955,6 +1957,7 @@ class DisplayDaemonTests(unittest.TestCase):
 
         self.assertEqual(payload["appliance_state"], "reconnecting_console")
         self.assertEqual(payload["console_backend"], "spice")
+        self.assertEqual(payload["kiosk_compositor"], "cage")
         self.assertIsNone(payload["active_console_backend"])
         self.assertIsNone(payload["vnc_endpoint"])
         self.assertTrue(payload["session_ready"])
@@ -1977,6 +1980,7 @@ class DisplayDaemonTests(unittest.TestCase):
             payload = json.loads(config.runtime.daemon_state_path.read_text(encoding="utf-8"))
 
         self.assertEqual(payload["console_backend"], "vnc")
+        self.assertEqual(payload["kiosk_compositor"], "cage")
         self.assertEqual(payload["vnc_endpoint"], "127.0.0.1:5977")
 
     def test_state_file_includes_looking_glass_shm_file_for_backend(self) -> None:
@@ -1998,6 +2002,7 @@ class DisplayDaemonTests(unittest.TestCase):
             payload = json.loads(config.runtime.daemon_state_path.read_text(encoding="utf-8"))
 
         self.assertEqual(payload["console_backend"], "looking-glass")
+        self.assertEqual(payload["kiosk_compositor"], "cage")
         self.assertEqual(payload["looking_glass_shm_file"], str(shm_file))
 
     def test_state_file_includes_moonlight_app_for_backend(self) -> None:
@@ -2016,6 +2021,7 @@ class DisplayDaemonTests(unittest.TestCase):
             payload = json.loads(config.runtime.daemon_state_path.read_text(encoding="utf-8"))
 
         self.assertEqual(payload["console_backend"], "moonlight")
+        self.assertEqual(payload["kiosk_compositor"], "sway")
         self.assertEqual(payload["moonlight_app"], "Steam Big Picture")
 
 
@@ -2023,6 +2029,7 @@ def build_config(
     root: Path,
     *,
     backend: str = "spice",
+    kiosk_compositor: str = "auto",
     vnc_bind_host: str = "127.0.0.1",
     vnc_display_number: int = 77,
     vnc_viewer: str = "remote-viewer",
@@ -2096,6 +2103,10 @@ def build_config(
         display=DisplayConfig(
             output_name=output_name,
             power_helper=power_helper,
+        ),
+        kiosk=KioskConfig(
+            compositor=kiosk_compositor,
+            resolved_compositor=resolve_kiosk_compositor(backend, kiosk_compositor),
         ),
         input=InputConfig(
             power_button_event=Path("/dev/input/by-path/platform-i8042-serio-0-event-power"),

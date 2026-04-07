@@ -28,6 +28,7 @@ REQUIRED_PACKAGES = (
     "python3-evdev",
     "cage",
     "seatd",
+    "sway",
     "virt-viewer",
     "wlr-randr",
 )
@@ -73,6 +74,10 @@ class HostInstallPaths:
     @property
     def session_launcher(self) -> Path:
         return self.lib_dir / "relayinner-display-session"
+
+    @property
+    def kiosk_launcher(self) -> Path:
+        return self.lib_dir / "relayinner-display-kiosk"
 
     @property
     def session_entrypoint_launcher(self) -> Path:
@@ -203,6 +208,9 @@ def render_sample_config() -> str:
         control_socket = "/run/relayinner-display/session.sock"
         log_namespace = "relayinner-display"
 
+        [kiosk]
+        compositor = "auto"
+
         [console]
         artifact_dir = "/run/relayinner-display/console"
 
@@ -237,7 +245,8 @@ def render_sample_config() -> str:
         # The relay launches paired Desktop streams directly from the managed workspace
         # state, validates other app names against the live Sunshine app list
         # case-insensitively, and reconnects if Moonlight exits unexpectedly while the
-        # VM remains running.
+        # VM remains running. With kiosk.compositor = "auto", Moonlight resolves to
+        # the sway kiosk path while spice, vnc, and looking-glass keep the cage path.
         #
         # [console.moonlight]
         # binary = "moonlight"
@@ -295,10 +304,8 @@ def build_installed_daemon_command(
 
 def build_installed_kiosk_command(
     paths: HostInstallPaths = HostInstallPaths(),
-    cage_binary: str | None = None,
 ) -> list[str]:
-    cage_binary = cage_binary or resolve_host_binary("cage", "/usr/bin/cage")
-    return [cage_binary, "--", str(paths.session_entrypoint_launcher)]
+    return [str(paths.kiosk_launcher)]
 
 
 def build_installed_seatd_command(
@@ -343,7 +350,7 @@ def render_kiosk_service(
     return textwrap.dedent(
         f"""\
         [Unit]
-        Description=RelayInnerDisplay Cage kiosk session on tty1
+        Description=RelayInnerDisplay kiosk session on tty1
         After=systemd-user-sessions.service relayinner-display-seatd.service relayinner-displayd.service
         Requires=relayinner-display-seatd.service relayinner-displayd.service
         Conflicts=getty@tty1.service display-manager.service
@@ -548,6 +555,7 @@ class HostBootstrapInstaller:
 
         launchers = {
             self.paths.daemon_launcher: render_launcher("relayinner_display.daemon"),
+            self.paths.kiosk_launcher: render_launcher("relayinner_display.kiosk_launcher"),
             self.paths.session_launcher: render_launcher("relayinner_display.session"),
             self.paths.session_entrypoint_launcher: render_launcher("relayinner_display.kiosk"),
         }
@@ -600,7 +608,9 @@ class HostBootstrapInstaller:
         if kiosk_supplementary_groups:
             self.output("Detected kiosk DRM access groups: " + ", ".join(kiosk_supplementary_groups))
         else:
-            self.output("WARNING: no DRM access groups detected under /dev/dri; Cage may fail to access the GPU")
+            self.output(
+                "WARNING: no DRM access groups detected under /dev/dri; the kiosk compositor may fail to access the GPU"
+            )
         self._write_text(self._stage(self.paths.seatd_service_path), render_seatd_service(), mode=0o644)
         self._write_text(
             self._stage(self.paths.kiosk_service_path),

@@ -234,6 +234,7 @@ class DisplayDaemon:
             vmid=config.target.vmid,
             node_name="",
             console_backend=config.target.console_backend,
+            kiosk_compositor=config.kiosk.resolved_compositor,
             vnc_endpoint=config.console.vnc.endpoint if config.console.vnc is not None else None,
             looking_glass_shm_file=(
                 str(config.console.looking_glass.shm_file)
@@ -317,10 +318,12 @@ class DisplayDaemon:
         self._transition(SessionState.WAITING_FOR_SESSION)
         self._persist_state()
         self.session_logger.info(
-            "Daemon started for VM %s on node %s with backend=%s",
+            "Daemon started for VM %s on node %s with backend=%s configured_kiosk_compositor=%s kiosk_compositor=%s",
             self.state.vmid,
             self.state.node_name,
             self.config.target.console_backend,
+            self.config.kiosk.compositor,
+            self.config.kiosk.resolved_compositor,
         )
 
     def on_session_disconnected(self) -> None:

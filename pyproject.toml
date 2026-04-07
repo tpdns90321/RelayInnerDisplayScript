@@ -17,6 +17,7 @@ dependencies = [
 
 [project.scripts]
 relayinner-displayd = "relayinner_display.daemon:main"
+relayinner-display-kiosk = "relayinner_display.kiosk_launcher:main"
 relayinner-display-session = "relayinner_display.session:main"
 relayinner-display-session-entrypoint = "relayinner_display.kiosk:main"
 

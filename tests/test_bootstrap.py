@@ -158,6 +158,8 @@ class BootstrapTests(unittest.TestCase):
             Path("/run/relayinner-display/console/spice-current.vv"),
         )
         self.assertEqual(config.runtime.run_dir, Path("/run/relayinner-display"))
+        self.assertEqual(config.kiosk.compositor, "auto")
+        self.assertEqual(config.kiosk.resolved_compositor, "cage")
 
     def test_render_logind_override_matches_parser_expectation(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -226,9 +228,7 @@ class BootstrapTests(unittest.TestCase):
         self.assertEqual(
             build_installed_kiosk_command(paths),
             [
-                "/usr/bin/cage",
-                "--",
-                "/usr/local/lib/relayinner-display/session-entrypoint",
+                "/usr/local/lib/relayinner-display/relayinner-display-kiosk",
             ],
         )
         self.assertEqual(
@@ -251,7 +251,7 @@ class BootstrapTests(unittest.TestCase):
             )
             self.assertEqual(
                 build_installed_kiosk_command(HostInstallPaths()),
-                ["/usr/local/bin/cage", "--", "/usr/local/lib/relayinner-display/session-entrypoint"],
+                ["/usr/local/lib/relayinner-display/relayinner-display-kiosk"],
             )
 
     def test_rendered_services_include_required_units_and_restart_policy(self) -> None:
@@ -268,10 +268,9 @@ class BootstrapTests(unittest.TestCase):
         self.assertIn(f"StartLimitBurst={SYSTEMD_START_LIMIT_BURST}", daemon_unit)
         self.assertIn("Requires=relayinner-display-seatd.service relayinner-displayd.service", kiosk_unit)
         self.assertIn(
-            "ExecStart=/usr/bin/cage -- /usr/local/lib/relayinner-display/session-entrypoint",
+            "ExecStart=/usr/local/lib/relayinner-display/relayinner-display-kiosk",
             kiosk_unit,
         )
-        self.assertNotIn("seatd-launch", kiosk_unit)
         self.assertIn("SupplementaryGroups=video render", kiosk_unit)
         self.assertIn("Environment=LIBSEAT_BACKEND=seatd", kiosk_unit)
         self.assertIn("TTYPath=/dev/tty1", kiosk_unit)
@@ -656,7 +655,7 @@ class BootstrapTests(unittest.TestCase):
     def test_required_packages_match_spec(self) -> None:
         self.assertEqual(
             REQUIRED_PACKAGES,
-            ("python3", "python3-evdev", "cage", "seatd", "virt-viewer", "wlr-randr"),
+            ("python3", "python3-evdev", "cage", "seatd", "sway", "virt-viewer", "wlr-randr"),
         )
 
 

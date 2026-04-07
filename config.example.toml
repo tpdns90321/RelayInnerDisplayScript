@@ -11,6 +11,9 @@ run_dir = "/run/relayinner-display"
 control_socket = "/run/relayinner-display/session.sock"
 log_namespace = "relayinner-display"
 
+[kiosk]
+compositor = "auto"
+
 [console]
 artifact_dir = "/run/relayinner-display/console"
 
@@ -45,7 +48,8 @@ vv_path = "/run/relayinner-display/console/spice-current.vv"
 # The relay launches paired Desktop streams directly from the managed workspace
 # state, validates other app names against the live Sunshine app list
 # case-insensitively, and reconnects if Moonlight exits unexpectedly while the
-# VM remains running.
+# VM remains running. With kiosk.compositor = "auto", Moonlight resolves to
+# the sway kiosk path while spice, vnc, and looking-glass keep the cage path.
 #
 # [console.moonlight]
 # binary = "moonlight"

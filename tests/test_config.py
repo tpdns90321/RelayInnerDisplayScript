@@ -54,6 +54,8 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.policy.power_state_stabilize_ms, 3000)
         self.assertEqual(config.display.output_name, "")
         self.assertEqual(config.display.power_helper, "wlr-randr")
+        self.assertEqual(config.kiosk.compositor, "auto")
+        self.assertEqual(config.kiosk.resolved_compositor, "cage")
         self.assertFalse(config.input.forward_power_button)
         self.assertEqual(config.input.debounce_ms, 2000)
         self.assertEqual(config.policy.power_button_action_when_running, "shutdown")
@@ -88,6 +90,7 @@ class ConfigTests(unittest.TestCase):
 
         self.assertEqual(config.display.output_name, "HDMI-A-1")
         self.assertEqual(config.display.power_helper, "relay-wlopm")
+        self.assertEqual(config.kiosk.resolved_compositor, "cage")
         self.assertEqual(config.policy.dpms_off_delay_ms, 9000)
         self.assertEqual(config.policy.power_state_stabilize_ms, 1000)
 
@@ -122,6 +125,7 @@ class ConfigTests(unittest.TestCase):
             config = load_config(config_path)
 
         self.assertEqual(config.display.output_name, "HDMI-A-1")
+        self.assertEqual(config.kiosk.resolved_compositor, "cage")
         self.assertTrue(config.input.forward_power_button)
         self.assertEqual(config.input.debounce_ms, 3000)
         self.assertEqual(config.policy.dpms_off_delay_ms, 7000)
@@ -158,6 +162,7 @@ class ConfigTests(unittest.TestCase):
             config = load_config(config_path)
 
         self.assertEqual(config.target.console_backend, "vnc")
+        self.assertEqual(config.kiosk.resolved_compositor, "cage")
         self.assertIsNotNone(config.console.vnc)
         self.assertIsNone(config.console.spice)
         self.assertEqual(config.console.vnc.bind_host, "127.0.0.1")
@@ -185,6 +190,7 @@ class ConfigTests(unittest.TestCase):
             config = load_config(config_path)
 
         self.assertEqual(config.target.console_backend, "looking-glass")
+        self.assertEqual(config.kiosk.resolved_compositor, "cage")
         self.assertIsNotNone(config.console.looking_glass)
         self.assertIsNone(config.console.spice)
         self.assertEqual(config.console.looking_glass.binary, "looking-glass-client")
@@ -205,6 +211,8 @@ class ConfigTests(unittest.TestCase):
             config = load_config(config_path)
 
         self.assertEqual(config.target.console_backend, "moonlight")
+        self.assertEqual(config.kiosk.compositor, "auto")
+        self.assertEqual(config.kiosk.resolved_compositor, "sway")
         self.assertIsNotNone(config.console.moonlight)
         self.assertIsNone(config.console.spice)
         self.assertEqual(config.console.moonlight.binary, "moonlight")
@@ -272,6 +280,106 @@ class ConfigTests(unittest.TestCase):
             config.console.moonlight.portable_marker_path,
             Path("/var/lib/relayinner-display/custom-moonlight/portable.dat"),
         )
+
+    def test_kiosk_auto_is_explicitly_accepted(self) -> None:
+        content = VALID_CONFIG + textwrap.dedent(
+            """
+
+            [kiosk]
+            compositor = "auto"
+            """
+        )
+        with TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "config.toml"
+            config_path.write_text(content, encoding="utf-8")
+            config = load_config(config_path)
+
+        self.assertEqual(config.kiosk.compositor, "auto")
+        self.assertEqual(config.kiosk.resolved_compositor, "cage")
+
+    def test_kiosk_accepts_supported_explicit_backend_combinations(self) -> None:
+        content = VALID_CONFIG + textwrap.dedent(
+            """
+
+            [kiosk]
+            compositor = "cage"
+            """
+        )
+        with TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "config.toml"
+            config_path.write_text(content, encoding="utf-8")
+            config = load_config(config_path)
+
+        self.assertEqual(config.kiosk.compositor, "cage")
+        self.assertEqual(config.kiosk.resolved_compositor, "cage")
+
+        content = VALID_CONFIG.replace('console_backend = "spice"', 'console_backend = "moonlight"')
+        content = content.replace(
+            "[console.spice]\nvv_path = \"/run/relayinner-display/console/spice-current.vv\"\n",
+            textwrap.dedent(
+                """\
+                [kiosk]
+                compositor = "sway"
+
+                [console.moonlight]
+                host = "192.168.50.20"
+                """
+            ),
+        )
+        with TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "config.toml"
+            config_path.write_text(content, encoding="utf-8")
+            config = load_config(config_path)
+
+        self.assertEqual(config.kiosk.compositor, "sway")
+        self.assertEqual(config.kiosk.resolved_compositor, "sway")
+
+    def test_kiosk_rejects_unsupported_backend_combinations(self) -> None:
+        invalid_configs = (
+            VALID_CONFIG + textwrap.dedent(
+                """
+
+                [kiosk]
+                compositor = "sway"
+                """
+            ),
+            VALID_CONFIG.replace('console_backend = "spice"', 'console_backend = "moonlight"').replace(
+                "[console.spice]\nvv_path = \"/run/relayinner-display/console/spice-current.vv\"\n",
+                textwrap.dedent(
+                    """\
+                    [kiosk]
+                    compositor = "cage"
+
+                    [console.moonlight]
+                    host = "192.168.50.20"
+                    """
+                ),
+            ),
+        )
+
+        for content in invalid_configs:
+            with self.subTest(content=content):
+                with TemporaryDirectory() as temp_dir:
+                    config_path = Path(temp_dir) / "config.toml"
+                    config_path.write_text(content, encoding="utf-8")
+
+                    with self.assertRaises(ConfigError):
+                        load_config(config_path)
+
+    def test_kiosk_rejects_unknown_compositor_values(self) -> None:
+        content = VALID_CONFIG + textwrap.dedent(
+            """
+
+            [kiosk]
+            compositor = "river"
+            """
+        )
+        with TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "config.toml"
+            config_path.write_text(content, encoding="utf-8")
+
+            with self.assertRaises(ConfigError):
+                load_config(config_path)
 
     def test_legacy_runtime_spice_vv_path_is_accepted_for_spice_only(self) -> None:
         content = """

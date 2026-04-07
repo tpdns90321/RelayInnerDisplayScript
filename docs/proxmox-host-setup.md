@@ -12,6 +12,7 @@ This MVP supports one deployment path: direct installation onto a Proxmox VE hos
   - `python3-evdev`
   - `cage`
   - `seatd`
+  - `sway`
   - `virt-viewer`
   - `wlr-randr`
 
@@ -25,6 +26,7 @@ When `console_backend = "moonlight"`, operators also need Linux `moonlight-qt` v
    - `[target].vmid`
    - `[target].node_name`
    - `[target].console_backend` if you are switching from the default SPICE path
+   - `[kiosk].compositor` if you need to override the default `auto` behavior; `auto` resolves to `cage` for `spice`, `vnc`, and `looking-glass`, and to `sway` for `moonlight`
    - `[console.vnc].display_number` plus matching VM `args: -vnc 127.0.0.1:<display_number>` when using `console_backend = "vnc"`
    - `[console.looking_glass].shm_file` plus any renderer or SPICE overrides when using `console_backend = "looking-glass"`
    - `[console.moonlight].host` plus any non-default `app`, `base_port`, or `state_dir` when using `console_backend = "moonlight"`
@@ -99,7 +101,7 @@ For the required host and guest preparation, follow the upstream documentation:
 
 ## Moonlight Backend
 
-Use `console_backend = "moonlight"` only after the guest already runs Sunshine and the Proxmox host already has Linux `moonlight-qt` version `6.0.0` or newer. The current Specs 30 through 32 slice covers the backend contract, persistent workspace, PIN-assist pairing, live app validation, direct `moonlight stream` launch, and reconnect behavior:
+Use `console_backend = "moonlight"` only after the guest already runs Sunshine and the Proxmox host already has Linux `moonlight-qt` version `6.0.0` or newer. Specs 30 through 32 plus Spec 50 cover the backend contract, persistent workspace, PIN-assist pairing, live app validation, direct `moonlight stream` launch, reconnect behavior, and compositor selection:
 
 - the installer does not configure Sunshine inside the guest
 - the relay does not store Sunshine usernames or passwords
@@ -111,6 +113,9 @@ Configure the relay like this:
 [target]
 console_backend = "moonlight"
 
+[kiosk]
+compositor = "auto"
+
 [console.moonlight]
 binary = "moonlight"
 host = "192.168.50.20"
@@ -119,6 +124,8 @@ app = "Desktop"
 state_dir = "/var/lib/relayinner-display/moonlight"
 quit_app_after_session = false
 ```
+
+With `compositor = "auto"`, the relay resolves Moonlight to the `sway` kiosk path. The other backends still resolve to `cage` unless you override that contract explicitly with a supported combination.
 
 `app` is matched case-insensitively against the live Sunshine app list from `moonlight list --csv` when you target a non-`Desktop` Sunshine entry. `quit_app_after_session = true` is valid only for non-`Desktop` apps; the `Desktop` entry is treated as a stream surface, not a relay-managed launchable program.
 
@@ -226,6 +233,7 @@ journalctl -u relayinner-displayd.service -u relayinner-display-kiosk.service -b
 The runtime state file now records the public appliance state and key fault markers:
 
 - `appliance_state`
+- `kiosk_compositor`
 - `session_ready`
 - `vm_power_state`
 - `display_power_applied`
@@ -267,11 +275,11 @@ Then inspect journald by subsystem:
 - `relayinner-display.input` for host power-button validation or evdev read failures
 - `relayinner-display.session` for session connection and state-transition events
 
-If the kiosk journal shows the `libseat` sequence `Could not connect to socket /run/seatd.sock: Permission denied`, `Could not open target tty: Permission denied`, `Timeout waiting session to become active`, or `Unable to create the wlroots backend`, confirm the installed kiosk unit launches `cage -- /usr/local/lib/relayinner-display/session-entrypoint` and that `relayinner-display-seatd.service` is up with the relay group owning `/run/seatd.sock`. Older installs that still launch `seatd-launch -- cage -- ...` can fail immediately with `status=1`; rerun `sudo ./install.sh` to refresh the units before debugging further. If `relayinner-display-seatd.service` instead fails with `Failed at step EXEC spawning /usr/bin/seatd`, rerun `sudo ./install.sh` so the installer refreshes the seatd unit with the actual host binary path, such as `/usr/sbin/seatd`, then restart `relayinner-display-seatd.service`, `relayinner-displayd.service`, and `relayinner-display-kiosk.service`.
+If the kiosk journal shows the `libseat` sequence `Could not connect to socket /run/seatd.sock: Permission denied`, `Could not open target tty: Permission denied`, `Timeout waiting session to become active`, or `Unable to create the wlroots backend`, confirm the installed kiosk unit launches `/usr/local/lib/relayinner-display/relayinner-display-kiosk` and that `relayinner-display-seatd.service` is up with the relay group owning `/run/seatd.sock`. Older installs that still launch `seatd-launch -- cage -- ...` or embed `cage -- /usr/local/lib/relayinner-display/session-entrypoint` directly can fail immediately or drift from the current compositor-selection contract; rerun `sudo ./install.sh` to refresh the units before debugging further. If `relayinner-display-seatd.service` instead fails with `Failed at step EXEC spawning /usr/bin/seatd`, rerun `sudo ./install.sh` so the installer refreshes the seatd unit with the actual host binary path, such as `/usr/sbin/seatd`, then restart `relayinner-display-seatd.service`, `relayinner-displayd.service`, and `relayinner-display-kiosk.service`.
 
 If the kiosk journal shows `failed to open /dev/dri/renderD128: Permission denied`, `failed to open /dev/dri/card0: Permission denied`, or `Unable to create the wlroots renderer`, the kiosk service lacks the GPU groups required to open the DRM nodes. The installer now detects the owning groups for `/dev/dri/card*` and `/dev/dri/renderD*` and renders them into `SupplementaryGroups=` for `relayinner-display-kiosk.service`; rerun `sudo ./install.sh` and verify the unit contains the expected groups, typically `video render`.
 
-The managed kiosk unit also exports `LIBSEAT_BACKEND=seatd` so `cage` uses the same backend as the successful transient `systemd-run` checks instead of depending on libseat backend auto-selection.
+The managed kiosk unit also exports `LIBSEAT_BACKEND=seatd` so the resolved kiosk compositor uses the same backend as the successful transient `systemd-run` checks instead of depending on libseat backend auto-selection.
 
 If `systemctl status relayinner-display-kiosk.service` briefly shows the child process as `/usr/bin/python3 /usr/local/lib/relayinner-display/session-entrypoint` before `cage` exits with `status=1`, the installed runtime is likely older than the absolute-path launcher hotfix. Refresh `/usr/local/lib/relayinner-display/relayinner_display/kiosk.py` with `sudo ./install.sh`; older copies tried to exec `relayinner-display-session` by bare name, which fails when `cage` does not preserve the kiosk unit `PATH`.
 

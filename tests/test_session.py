@@ -13,9 +13,11 @@ from relayinner_display.config import (
     ConsoleVncConfig,
     DisplayConfig,
     InputConfig,
+    KioskConfig,
     PolicyConfig,
     RuntimeConfig,
     TargetConfig,
+    resolve_kiosk_compositor,
 )
 from relayinner_display.session import SessionSupervisor
 
@@ -669,6 +671,10 @@ def build_config(
         display=DisplayConfig(
             output_name="HDMI-A-1",
             power_helper=power_helper,
+        ),
+        kiosk=KioskConfig(
+            compositor="auto",
+            resolved_compositor=resolve_kiosk_compositor(backend, "auto"),
         ),
         input=InputConfig(
             power_button_event=Path("/dev/input/by-path/platform-i8042-serio-0-event-power"),
