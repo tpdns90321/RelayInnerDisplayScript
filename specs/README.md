@@ -19,6 +19,9 @@ This directory contains the current MVP spec set, the implemented console-backen
 - `31-moonlight-pair-assist-and-persistent-workspace.md`
 - `32-moonlight-stream-launch-recovery-and-ops.md`
 - `40-moonlight-desktop-fast-path-and-pair-state-resilience.md`
+- `50-kiosk-compositor-selection-contract.md`
+- `51-managed-sway-kiosk-runtime.md`
+- `52-moonlight-on-sway-support-matrix-and-ops.md`
 
 ## Product Summary
 
@@ -32,6 +35,7 @@ RelayInnerDisplayScript turns a Proxmox host with an attached monitor into a sin
 - Specs 20 through 22 define the current implemented backend expansion so operators can choose SPICE, VNC, or Looking Glass from config today.
 - Specs 30 through 32 define the implemented Moonlight client series for Sunshine-backed guests.
 - Spec 40 captures the first Moonlight runtime hardening follow-up for `Desktop` fast-path launch and pair-state resilience.
+- Specs 50 through 52 define the planned Wave 5 compositor-selection and Moonlight-on-sway follow-up series.
 
 ## Shared Defaults
 
@@ -57,6 +61,9 @@ RelayInnerDisplayScript turns a Proxmox host with an attached monitor into a sin
 11. Spec 31
 12. Spec 32
 13. Spec 40
+14. Spec 50
+15. Spec 51
+16. Spec 52
 
 ## Expansion Plan
 
@@ -74,6 +81,7 @@ Parallelization rule:
 - Do not start the Moonlight implementation series until Spec 30 has defined the backend contract, working-directory launch support, and documentation baseline.
 - After that point, Spec 31 owns the persistent workspace and pair-assist flow, and Spec 32 owns runtime launch, reconnect, and operator docs.
 - Do not start Spec 40 until Specs 31 and 32 have shipped the initial pair-state and app-validation contracts; Spec 40 narrows those contracts based on operational evidence.
+- Do not start Wave 5 until Spec 40 has captured the current Moonlight runtime contract; Spec 50 turns compositor choice into explicit configuration, Spec 51 defines the managed sway runtime, and Spec 52 updates the support matrix and operations guidance.
 
 ```mermaid
 flowchart LR
@@ -96,6 +104,12 @@ flowchart LR
         S40["Spec 40\nMoonlight Desktop Fast-Path and Pair-State Resilience"]
     end
 
+    subgraph Wave_5["Wave 5"]
+        S50["Spec 50\nKiosk Compositor Selection Contract"]
+        S51["Spec 51\nManaged Sway Kiosk Runtime"]
+        S52["Spec 52\nMoonlight on Sway Support Matrix and Ops"]
+    end
+
     S20 --> S21
     S20 --> S22
     S20 --> S30
@@ -103,4 +117,7 @@ flowchart LR
     S31 --> S32
     S31 --> S40
     S32 --> S40
+    S40 --> S50
+    S50 --> S51
+    S51 --> S52
 ```
