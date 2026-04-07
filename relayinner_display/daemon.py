@@ -261,6 +261,7 @@ class DisplayDaemon:
         self.power_button_action_started_at: datetime | None = None
         self.proxmox_failure_timestamps: list[datetime] = []
         self.moonlight_pair_requested_at: datetime | None = None
+        self.moonlight_pair_launch_pending = False
 
     def prepare_runtime(self) -> None:
         self.config.runtime.run_dir.mkdir(parents=True, exist_ok=True)
@@ -309,6 +310,7 @@ class DisplayDaemon:
         self.console_running = False
         self.console_pid = None
         self.state.active_console_backend = None
+        self.moonlight_pair_launch_pending = False
         if self.startup_error is not None or self.state.degraded_reason is not None:
             self._transition(SessionState.DEGRADED)
         else:
@@ -330,6 +332,7 @@ class DisplayDaemon:
             self.console_running = False
             self.console_pid = None
             self.state.active_console_backend = None
+            self.moonlight_pair_launch_pending = False
             self.session_logger.info("Session ready")
             if self.startup_error is not None or self.state.degraded_reason is not None:
                 self._transition(SessionState.DEGRADED)
@@ -374,7 +377,13 @@ class DisplayDaemon:
             self.next_reconnect_at = None
             self.current_reconnect_delay_ms = self.config.policy.reconnect_initial_ms
             self.state.last_error = None
-            self._transition(SessionState.SHOWING_CONSOLE)
+            if (
+                backend == "moonlight"
+                and self.state.moonlight_pair_state is MoonlightPairState.PENDING_PIN_APPROVAL
+            ):
+                self._transition(SessionState.WAITING_FOR_PAIRING)
+            else:
+                self._transition(SessionState.SHOWING_CONSOLE)
             self._persist_state()
             self.console_logger.info(
                 "Console started: backend=%s pid=%s",
@@ -403,6 +412,21 @@ class DisplayDaemon:
             exit_code = int(payload["code"])
             exit_signal = int(payload["signal"])
             self.state.mark_console_exit(timestamp, exit_code, exit_signal, backend)
+            if (
+                backend == "moonlight"
+                and self.state.moonlight_pair_state is MoonlightPairState.PENDING_PIN_APPROVAL
+            ):
+                self.moonlight_pair_launch_pending = False
+                self.next_reconnect_at = None
+                self.state.last_error = None
+                self._transition(SessionState.WAITING_FOR_PAIRING)
+                self._persist_state()
+                self.console_logger.info(
+                    "Moonlight pairing UI exited: code=%s signal=%s",
+                    exit_code,
+                    exit_signal,
+                )
+                return []
             self.state.last_error = (
                 f"Console backend={backend} exited unexpectedly (code={exit_code}, signal={exit_signal})"
             )
@@ -468,7 +492,13 @@ class DisplayDaemon:
 
         if self.console_running:
             self.state.last_error = None
-            self._transition(SessionState.SHOWING_CONSOLE)
+            if (
+                self.state.active_console_backend == "moonlight"
+                and self.state.moonlight_pair_state is MoonlightPairState.PENDING_PIN_APPROVAL
+            ):
+                self._transition(SessionState.WAITING_FOR_PAIRING)
+            else:
+                self._transition(SessionState.SHOWING_CONSOLE)
             self._persist_state()
             return actions + display_actions
 
@@ -800,6 +830,7 @@ class DisplayDaemon:
             self._set_moonlight_pair_state(MoonlightPairState.PAIRED)
             self.state.moonlight_pair_pin = None
             self.moonlight_pair_requested_at = None
+            self.moonlight_pair_launch_pending = False
             if not self._moonlight_app_is_available(available_apps):
                 raise RuntimeValidationError(
                     "Configured Moonlight app is not available on "
@@ -813,22 +844,24 @@ class DisplayDaemon:
             or self.state.moonlight_pair_pin is None
             or self.moonlight_pair_requested_at is None
             or now - self.moonlight_pair_requested_at >= MOONLIGHT_PAIR_TIMEOUT
+            or not self.moonlight_pair_launch_pending
         )
 
         if should_issue_pair:
             pin = self.pin_generator()
-            self._issue_moonlight_pair(pin)
             self.state.moonlight_pair_pin = pin
             self.moonlight_pair_requested_at = now
+            self.moonlight_pair_launch_pending = True
 
         self._set_moonlight_pair_state(MoonlightPairState.PENDING_PIN_APPROVAL)
         self.state.last_error = None
-        message = self._moonlight_pair_waiting_message()
         previous_state = self.state.session_state
         self._transition(SessionState.WAITING_FOR_PAIRING)
-        if previous_state is SessionState.WAITING_FOR_PAIRING and not should_issue_pair:
+        if should_issue_pair:
+            return True, [self._prepare_moonlight_pair_launch(self.state.moonlight_pair_pin)]
+        if previous_state is SessionState.WAITING_FOR_PAIRING:
             return True, []
-        return True, [message]
+        return True, [self._moonlight_pair_waiting_message()]
 
     def _moonlight_pairing_pending(self) -> bool:
         return (
@@ -865,6 +898,7 @@ class DisplayDaemon:
     def _clear_moonlight_pair_state(self) -> None:
         self.state.moonlight_pair_pin = None
         self.moonlight_pair_requested_at = None
+        self.moonlight_pair_launch_pending = False
         self._set_moonlight_pair_state(MoonlightPairState.UNKNOWN)
 
     def _moonlight_host_is_reachable(self, host: str, port: int) -> bool:
@@ -892,17 +926,23 @@ class DisplayDaemon:
             return None
         return parse_moonlight_app_list_csv(completed.stdout)
 
-    def _issue_moonlight_pair(self, pin: str) -> None:
+    def _prepare_moonlight_pair_launch(self, pin: str | None) -> dict[str, object]:
         moonlight = self.config.console.moonlight
-        if moonlight is None:
+        if moonlight is None or pin is None:
             raise AssertionError("Moonlight backend selected without console.moonlight config")
 
-        completed = self._run_moonlight_command(["pair", moonlight.host_authority, "--pin", pin])
         self.console_logger.info(
-            "Issued Moonlight pairing request for host=%s result=%s",
+            "Launching Moonlight pairing UI for host=%s workspace=%s",
             moonlight.host_authority,
-            completed.returncode,
+            moonlight.state_dir,
         )
+        return {
+            "type": "connect_console",
+            "backend": "moonlight",
+            "launcher": moonlight.binary,
+            "cwd": str(moonlight.state_dir),
+            "argv": [moonlight.binary, "pair", moonlight.host_authority, "--pin", pin],
+        }
 
     def _run_moonlight_command(self, subcommand: list[str]) -> subprocess.CompletedProcess[str]:
         moonlight = self.config.console.moonlight

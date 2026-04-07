@@ -646,8 +646,6 @@ class DisplayDaemonTests(unittest.TestCase):
                     return SimpleNamespace(returncode=0, stdout="Moonlight 6.1.0\n", stderr="")
                 if command == ["/usr/bin/moonlight", "list", "192.168.50.20", "--csv"]:
                     return SimpleNamespace(returncode=1, stdout="", stderr="not paired")
-                if command == ["/usr/bin/moonlight", "pair", "192.168.50.20", "--pin", "1234"]:
-                    return SimpleNamespace(returncode=0, stdout="", stderr="")
                 raise AssertionError(f"Unexpected Moonlight command: {command}")
 
             def fake_probe(host: str, port: int, timeout_s: float) -> None:
@@ -674,16 +672,11 @@ class DisplayDaemonTests(unittest.TestCase):
             actions,
             [
                 {
-                    "type": "show_waiting",
-                    "reason": "pairing_required",
-                    "details": {
-                        "backend": "moonlight",
-                        "host": "192.168.50.20",
-                        "pin": "1234",
-                        "instructions": (
-                            "Open the Sunshine web UI PIN page on the guest and enter this PIN."
-                        ),
-                    },
+                    "type": "connect_console",
+                    "backend": "moonlight",
+                    "launcher": "moonlight",
+                    "cwd": str(state_dir),
+                    "argv": ["moonlight", "pair", "192.168.50.20", "--pin", "1234"],
                 }
             ],
         )
@@ -692,7 +685,6 @@ class DisplayDaemonTests(unittest.TestCase):
             [
                 (["/usr/bin/moonlight", "--version"], None),
                 (["/usr/bin/moonlight", "list", "192.168.50.20", "--csv"], str(state_dir)),
-                (["/usr/bin/moonlight", "pair", "192.168.50.20", "--pin", "1234"], str(state_dir)),
             ],
         )
         self.assertEqual(daemon.state.session_state, SessionState.WAITING_FOR_PAIRING)
@@ -712,7 +704,7 @@ class DisplayDaemonTests(unittest.TestCase):
                 backend="moonlight",
                 moonlight_state_dir=state_dir,
             )
-            list_results = iter([1, 1, 0])
+            list_results = iter([1, 0])
             moonlight_commands: list[tuple[list[str], str | None]] = []
 
             def fake_command_runner(
@@ -733,8 +725,6 @@ class DisplayDaemonTests(unittest.TestCase):
                         stdout=moonlight_app_list_csv("Desktop") if result == 0 else "",
                         stderr="",
                     )
-                if command == ["/usr/bin/moonlight", "pair", "192.168.50.20", "--pin", "1234"]:
-                    return SimpleNamespace(returncode=0, stdout="", stderr="")
                 raise AssertionError(f"Unexpected Moonlight command: {command}")
 
             daemon = DisplayDaemon(
@@ -752,11 +742,31 @@ class DisplayDaemonTests(unittest.TestCase):
             daemon.handle_session_message({"type": "session_ready"}, now=start_time)
 
             first_actions = daemon.tick(now=start_time)
+            daemon.handle_session_message(
+                {"type": "console_started", "backend": "moonlight", "pid": 9004},
+                now=start_time + timedelta(seconds=1),
+            )
             second_actions = daemon.tick(now=start_time + timedelta(seconds=2))
+            exit_actions = daemon.handle_session_message(
+                {"type": "console_exited", "backend": "moonlight", "code": 0, "signal": 0},
+                now=start_time + timedelta(seconds=3),
+            )
             third_actions = daemon.tick(now=start_time + timedelta(seconds=4))
 
-        self.assertEqual(first_actions[0]["reason"], "pairing_required")
+        self.assertEqual(
+            first_actions,
+            [
+                {
+                    "type": "connect_console",
+                    "backend": "moonlight",
+                    "launcher": "moonlight",
+                    "cwd": str(state_dir),
+                    "argv": ["moonlight", "pair", "192.168.50.20", "--pin", "1234"],
+                }
+            ],
+        )
         self.assertEqual(second_actions, [])
+        self.assertEqual(exit_actions, [])
         self.assertEqual(
             third_actions,
             [
@@ -784,11 +794,45 @@ class DisplayDaemonTests(unittest.TestCase):
             [
                 (["/usr/bin/moonlight", "--version"], None),
                 (["/usr/bin/moonlight", "list", "192.168.50.20", "--csv"], str(state_dir)),
-                (["/usr/bin/moonlight", "pair", "192.168.50.20", "--pin", "1234"], str(state_dir)),
-                (["/usr/bin/moonlight", "list", "192.168.50.20", "--csv"], str(state_dir)),
                 (["/usr/bin/moonlight", "list", "192.168.50.20", "--csv"], str(state_dir)),
             ],
         )
+
+    def test_moonlight_pairing_console_keeps_waiting_state_while_running(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            state_dir = Path(temp_dir) / "moonlight-state"
+            config = build_config(
+                Path(temp_dir),
+                backend="moonlight",
+                moonlight_state_dir=state_dir,
+            )
+            daemon = DisplayDaemon(
+                config=config,
+                proxmox=FakeProxmoxClient(["running", "running"]),
+                dependency_finder=lambda name: f"/usr/bin/{Path(name).name}",
+                command_runner=lambda command, cwd=None, text=True, capture_output=True, check=False, **_: (
+                    SimpleNamespace(returncode=0, stdout="Moonlight 6.1.0\n", stderr="")
+                    if command == ["/usr/bin/moonlight", "--version"]
+                    else SimpleNamespace(returncode=1, stdout="", stderr="")
+                ),
+                tcp_connect_probe=lambda host, port, timeout_s: None,
+                pin_generator=lambda: "1234",
+            )
+            start_time = datetime(2026, 4, 7, 0, 0, tzinfo=timezone.utc)
+
+            daemon.prepare_runtime()
+            daemon.start(now=start_time)
+            daemon.handle_session_message({"type": "session_ready"}, now=start_time)
+            daemon.tick(now=start_time)
+            daemon.handle_session_message(
+                {"type": "console_started", "backend": "moonlight", "pid": 9004},
+                now=start_time + timedelta(seconds=1),
+            )
+            actions = daemon.tick(now=start_time + timedelta(seconds=2))
+
+        self.assertEqual(actions, [])
+        self.assertTrue(daemon.console_running)
+        self.assertEqual(daemon.state.session_state, SessionState.WAITING_FOR_PAIRING)
 
     def test_moonlight_app_match_is_case_insensitive(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -903,7 +947,6 @@ class DisplayDaemonTests(unittest.TestCase):
                 moonlight_state_dir=state_dir,
             )
             pins = iter(["1111", "2222"])
-            pair_commands: list[list[str]] = []
 
             def fake_command_runner(
                 command: list[str],
@@ -917,9 +960,6 @@ class DisplayDaemonTests(unittest.TestCase):
                     return SimpleNamespace(returncode=0, stdout="Moonlight 6.1.0\n", stderr="")
                 if command == ["/usr/bin/moonlight", "list", "192.168.50.20", "--csv"]:
                     return SimpleNamespace(returncode=1, stdout="", stderr="")
-                if command[:4] == ["/usr/bin/moonlight", "pair", "192.168.50.20", "--pin"]:
-                    pair_commands.append(command)
-                    return SimpleNamespace(returncode=0, stdout="", stderr="")
                 raise AssertionError(f"Unexpected Moonlight command: {command}")
 
             daemon = DisplayDaemon(
@@ -940,16 +980,9 @@ class DisplayDaemonTests(unittest.TestCase):
             second_actions = daemon.tick(now=start_time + timedelta(seconds=299))
             third_actions = daemon.tick(now=start_time + timedelta(seconds=300))
 
-        self.assertEqual(first_actions[0]["details"]["pin"], "1111")
+        self.assertEqual(first_actions[0]["argv"][-1], "1111")
         self.assertEqual(second_actions, [])
-        self.assertEqual(third_actions[0]["details"]["pin"], "2222")
-        self.assertEqual(
-            pair_commands,
-            [
-                ["/usr/bin/moonlight", "pair", "192.168.50.20", "--pin", "1111"],
-                ["/usr/bin/moonlight", "pair", "192.168.50.20", "--pin", "2222"],
-            ],
-        )
+        self.assertEqual(third_actions[0]["argv"][-1], "2222")
         self.assertEqual(daemon.state.moonlight_pair_pin, "2222")
 
     def test_moonlight_pairing_clears_pin_when_host_becomes_unreachable(self) -> None:
@@ -974,8 +1007,6 @@ class DisplayDaemonTests(unittest.TestCase):
                     return SimpleNamespace(returncode=0, stdout="Moonlight 6.1.0\n", stderr="")
                 if command == ["/usr/bin/moonlight", "list", "192.168.50.20", "--csv"]:
                     return SimpleNamespace(returncode=1, stdout="", stderr="")
-                if command == ["/usr/bin/moonlight", "pair", "192.168.50.20", "--pin", "1234"]:
-                    return SimpleNamespace(returncode=0, stdout="", stderr="")
                 raise AssertionError(f"Unexpected Moonlight command: {command}")
 
             def fake_probe(host: str, port: int, timeout_s: float) -> None:

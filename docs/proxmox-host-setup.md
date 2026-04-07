@@ -124,7 +124,7 @@ quit_app_after_session = false
 
 At runtime the daemon verifies that the configured Moonlight binary exists and reports version `6.0.0` or newer, prepares `state_dir` plus `portable.dat`, probes TCP reachability to the configured Sunshine host, and uses `moonlight list <host-authority> --csv` from that managed workspace both to decide whether the host is already paired and to verify that the configured app exists before launch. If `base_port` differs from `47989`, the relay renders `host:port` for hostnames and IPv4 or `[ipv6]:port` for IPv6 literals before invoking Moonlight.
 
-If the host is reachable but not paired, the daemon generates a 4-digit PIN, issues `moonlight pair <host-authority> --pin <pin>`, and moves the kiosk into `waiting_for_pairing`. Approve that PIN in the Sunshine web UI `PIN` page on the guest-side host; once `moonlight list` succeeds, the relay clears the PIN and continues to `moonlight stream <host-authority> <app> --display-mode fullscreen` automatically. The relay appends `--quit-after` only when `quit_app_after_session = true`. The paired-host state remains in `state_dir` across daemon and host restarts.
+If the host is reachable but not paired, the daemon generates a 4-digit PIN, launches `moonlight pair <host-authority> --pin <pin>` inside the kiosk session, and moves the appliance into `waiting_for_pairing`. Moonlight's own pairing UI shows that PIN fullscreen; approve it in the Sunshine web UI `PIN` page on the guest-side host. The same PIN is also mirrored in `/run/relayinner-display/daemon.state.json` while approval is pending. Once `moonlight list` succeeds, the relay clears the PIN and continues to `moonlight stream <host-authority> <app> --display-mode fullscreen` automatically. The relay appends `--quit-after` only when `quit_app_after_session = true`. The paired-host state remains in `state_dir` across daemon and host restarts.
 
 If the configured app name does not exist in the live app list, the appliance enters controlled `degraded` state with a backend-tagged reason instead of launching an empty fullscreen Moonlight session. If Moonlight exits unexpectedly while the VM stays running and the Sunshine host remains reachable, the relay re-enters reconnect flow and repeats the same preflight checks before relaunching.
 
@@ -256,7 +256,7 @@ When the appliance is not showing the guest, inspect the state file first:
 
 - `appliance_state=display_sleeping` means the VM has remained off past `dpms_off_delay_ms`.
 - `appliance_state=waiting_for_vm` means the session is healthy but the VM is not in a runnable state.
-- `appliance_state=waiting_for_pairing` means the Moonlight host is reachable but still waiting for Sunshine PIN approval.
+- `appliance_state=waiting_for_pairing` means the Moonlight host is reachable but still waiting for Sunshine PIN approval, typically while the kiosk is showing Moonlight's pair UI.
 - `appliance_state=degraded` means a local runtime dependency, power-button validation, or repeated Proxmox command failure tripped the Spec 15 failure policy.
 
 Then inspect journald by subsystem:
@@ -289,7 +289,7 @@ If the state file or journal shows `console_backend=looking-glass` and the appli
 
 If Looking Glass reconnects repeatedly while the guest stays up, inspect the console log lines for `backend=looking-glass` and confirm the guest-side host application plus upstream passthrough setup are healthy. The relay only validates host-visible prerequisites; it does not diagnose guest-side capture or passthrough failures beyond that boundary.
 
-If the state file shows `appliance_state=waiting_for_pairing`, open the Sunshine web UI on the guest-side host, go to the `PIN` page, and enter the current `moonlight_pair_pin` shown on the kiosk or in `/run/relayinner-display/daemon.state.json`. The relay rotates that PIN after 300 seconds if approval has not completed yet.
+If the state file shows `appliance_state=waiting_for_pairing`, open the Sunshine web UI on the guest-side host, go to the `PIN` page, and enter the current `moonlight_pair_pin` shown by Moonlight's pairing UI or in `/run/relayinner-display/daemon.state.json`. The relay rotates that PIN after 300 seconds if approval has not completed yet.
 
 If the state file or journal shows `console_backend=moonlight` and the appliance moves into `degraded`, verify that Linux `moonlight-qt` `6.0.0` or newer is installed, that `[console.moonlight].host`, `base_port`, and `app` point at the expected Sunshine host and app, and that the configured `state_dir` plus `portable.dat` are present and writable by the `relayinner-display` session user. Check `moonlight_app` in `/run/relayinner-display/daemon.state.json` against `moonlight list <host-authority> --csv`; the relay matches app names case-insensitively but requires an exact app-name match, and `quit_app_after_session = true` is only valid for non-`Desktop` apps.
 
