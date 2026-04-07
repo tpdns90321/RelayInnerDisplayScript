@@ -6,7 +6,7 @@ The target outcome is a small appliance-like runtime that takes one VM managed b
 
 ## Status
 
-This repository now includes Specs 10 through 17 of the current MVP plan, Specs 20 through 22 for the implemented console-backend expansion series, Specs 30 through 32 for the completed Moonlight client slice, Spec 40 for the first Moonlight runtime hardening follow-up, Specs 50 through 51 for the implemented kiosk compositor-selection and managed sway runtime contracts, and Spec 52 for the remaining Moonlight-on-sway support-matrix follow-up.
+This repository now includes Specs 10 through 17 of the current MVP plan, Specs 20 through 22 for the implemented console-backend expansion series, Specs 30 through 32 for the completed Moonlight client slice, Spec 40 for the first Moonlight runtime hardening follow-up, Spec 41 for the next Moonlight client-resolution config follow-up, Specs 50 through 51 for the implemented kiosk compositor-selection and managed sway runtime contracts, and Spec 52 for the remaining Moonlight-on-sway support-matrix follow-up.
 
 - The MVP architecture and behavior are defined in `./specs`.
 - Spec 10 now has a Python implementation for config loading, daemon/session IPC, local Proxmox command wrappers, SPICE `.vv` generation, and reconnect state handling.
@@ -24,6 +24,7 @@ This repository now includes Specs 10 through 17 of the current MVP plan, Specs 
 - Spec 31 now extends the Moonlight path with relay-managed persistent pairing state, workspace-backed pair-status checks, session-launched `moonlight pair --pin` assist, `waiting_for_pairing` session flow, and runtime pairing metadata without storing Sunshine web-UI credentials.
 - Spec 32 now completes the Moonlight path with paired-workspace Desktop launch fallback, live non-Desktop app-list validation, `--quit-after` launch rules, reconnect recovery, `moonlight_app` runtime metadata, and operator-facing ops documentation.
 - Spec 40 now formalizes the follow-up Moonlight hardening contract: workspace-derived pair completion, paired `Desktop` fast-path launch, and preserved pair state across non-Desktop app-validation degradation.
+- Spec 41 now defines the next Moonlight config-surface follow-up: an optional `config.toml` resolution override that maps to Moonlight's `--resolution <width>x<height>` launch flag and runtime diagnostics.
 - Spec 50 now adds the kiosk compositor-selection contract: `[kiosk].compositor`, backend-specific auto resolution, early backend/compositor validation, a relay-managed kiosk launcher, and `kiosk_compositor` in runtime diagnostics.
 - Spec 51 now adds the managed sway kiosk runtime: a generated `/run/relayinner-display/sway.config`, output-aware workspace pinning, startup warnings for unavailable pinned outputs, and compositor-specific package selection during install.
 - Spec 52 remains the next Wave 5 follow-up for the Moonlight-on-sway support matrix and operator guidance.
@@ -174,6 +175,7 @@ Operationally, the appliance is expected to move through a small state machine:
 - [Spec 31: Moonlight Pair-Assist and Persistent Workspace](./specs/31-moonlight-pair-assist-and-persistent-workspace.md)
 - [Spec 32: Moonlight Stream Launch, Recovery, and Ops](./specs/32-moonlight-stream-launch-recovery-and-ops.md)
 - [Spec 40: Moonlight Desktop Fast-Path and Pair-State Resilience](./specs/40-moonlight-desktop-fast-path-and-pair-state-resilience.md)
+- [Spec 41: Moonlight Client Resolution Override](./specs/41-moonlight-client-resolution-override.md)
 - [Spec 50: Kiosk Compositor Selection Contract](./specs/50-kiosk-compositor-selection-contract.md)
 - [Spec 51: Managed Sway Kiosk Runtime](./specs/51-managed-sway-kiosk-runtime.md)
 - [Spec 52: Moonlight on Sway Support Matrix and Ops](./specs/52-moonlight-on-sway-support-matrix-and-ops.md)
@@ -193,16 +195,17 @@ Recommended implementation order:
 11. Spec 31
 12. Spec 32
 13. Spec 40
-14. Spec 50
-15. Spec 51
-16. Spec 52
+14. Spec 41
+15. Spec 50
+16. Spec 51
+17. Spec 52
 
 Console-backend expansion status:
 
 - Wave 1 is complete: Spec 20 generalized the shared console contract without regressing SPICE.
 - Wave 2 is complete: Spec 21 now owns the shipped VNC path, and Spec 22 now ships the preflight-only Looking Glass path on the same shared contract.
 - Wave 3 is complete: Specs 30 through 32 now ship the Moonlight backend contract, persistent pairing workspace, live app-list validation, fullscreen stream launch, and reconnect behavior for Sunshine-backed guests.
-- Wave 4 is complete: Spec 40 hardens the Moonlight runtime by treating paired `Desktop` launch separately from non-`Desktop` app-list validation.
+- Wave 4 now contains the implemented Spec 40 hardening pass plus the planned Spec 41 config-surface follow-up for client resolution overrides.
 - Wave 5 is in progress: Specs 50 through 51 now ship the compositor-selection and managed sway runtime contracts, and Spec 52 remains for the Moonlight-on-sway support matrix.
 
 ## Expected Host Dependencies
