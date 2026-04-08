@@ -16,6 +16,12 @@ DEFAULT_SWAY_BINARY = "sway"
 DEFAULT_ENTRYPOINT_PATH = "/usr/local/lib/relayinner-display/session-entrypoint"
 DEFAULT_SWAY_CONFIG_PATH = Path("/run/relayinner-display/sway.config")
 DEFAULT_SYS_CLASS_DRM_PATH = Path("/sys/class/drm")
+WLR_DRM_NO_ATOMIC_ENV = "WLR_DRM_NO_ATOMIC"
+WLR_DRM_NO_MODIFIERS_ENV = "WLR_DRM_NO_MODIFIERS"
+WLR_DRM_COMPATIBILITY_ENV_NAMES = (
+    WLR_DRM_NO_ATOMIC_ENV,
+    WLR_DRM_NO_MODIFIERS_ENV,
+)
 
 
 ExecFunction = Callable[[str, list[str], dict[str, str]], None]
@@ -146,6 +152,34 @@ def _build_exec_env(source_env: Mapping[str, str] | None = None) -> dict[str, st
     return dict(source)
 
 
+def build_drm_compatibility_env(drm_compatibility: str) -> dict[str, str]:
+    if drm_compatibility == "auto":
+        return {WLR_DRM_NO_MODIFIERS_ENV: "1"}
+    if drm_compatibility == "legacy-drm":
+        return {
+            WLR_DRM_NO_ATOMIC_ENV: "1",
+            WLR_DRM_NO_MODIFIERS_ENV: "1",
+        }
+    return {}
+
+
+def format_drm_compatibility_env(env: Mapping[str, str]) -> str:
+    if not env:
+        return "none"
+    return ",".join(f"{name}={env[name]}" for name in sorted(env))
+
+
+def build_kiosk_env(
+    config: AppConfig,
+    source_env: Mapping[str, str] | None = None,
+) -> dict[str, str]:
+    env = _build_exec_env(source_env)
+    for name in WLR_DRM_COMPATIBILITY_ENV_NAMES:
+        env.pop(name, None)
+    env.update(build_drm_compatibility_env(config.display.drm_compatibility))
+    return env
+
+
 def main(argv: list[str] | None = None, execvpe: ExecFunction = os.execvpe) -> int:
     args = build_parser().parse_args(argv)
     try:
@@ -159,6 +193,12 @@ def main(argv: list[str] | None = None, execvpe: ExecFunction = os.execvpe) -> i
         f"backend={config.target.console_backend} "
         f"configured_kiosk_compositor={config.kiosk.compositor} "
         f"kiosk_compositor={config.kiosk.resolved_compositor}"
+    )
+    drm_env = build_drm_compatibility_env(config.display.drm_compatibility)
+    print(
+        "relayinner-display-kiosk: "
+        f"display_drm_compatibility={config.display.drm_compatibility} "
+        f"effective_wlroots_drm_env={format_drm_compatibility_env(drm_env)}"
     )
 
     if config.kiosk.resolved_compositor == "sway":
@@ -190,7 +230,7 @@ def main(argv: list[str] | None = None, execvpe: ExecFunction = os.execvpe) -> i
     )
 
     try:
-        execvpe(command[0], command, _build_exec_env())
+        execvpe(command[0], command, build_kiosk_env(config))
     except OSError as exc:
         print(
             f"relayinner-display-kiosk: failed to exec {command[0]}: {exc}",

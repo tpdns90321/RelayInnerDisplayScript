@@ -162,6 +162,7 @@ class BootstrapTests(unittest.TestCase):
         self.assertEqual(config.runtime.run_dir, Path("/run/relayinner-display"))
         self.assertEqual(config.kiosk.compositor, "auto")
         self.assertEqual(config.kiosk.resolved_compositor, "cage")
+        self.assertEqual(config.display.drm_compatibility, "auto")
 
     def test_render_logind_override_matches_parser_expectation(self) -> None:
         with TemporaryDirectory() as temp_dir:

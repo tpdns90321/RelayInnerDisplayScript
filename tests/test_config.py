@@ -54,6 +54,7 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.policy.power_state_stabilize_ms, 3000)
         self.assertEqual(config.display.output_name, "")
         self.assertEqual(config.display.power_helper, "wlr-randr")
+        self.assertEqual(config.display.drm_compatibility, "auto")
         self.assertEqual(config.kiosk.compositor, "auto")
         self.assertEqual(config.kiosk.resolved_compositor, "cage")
         self.assertFalse(config.input.forward_power_button)
@@ -79,6 +80,7 @@ class ConfigTests(unittest.TestCase):
                 [display]
                 output_name = "HDMI-A-1"
                 power_helper = "relay-wlopm"
+                drm_compatibility = "legacy-drm"
                 """
             ),
         )
@@ -90,6 +92,7 @@ class ConfigTests(unittest.TestCase):
 
         self.assertEqual(config.display.output_name, "HDMI-A-1")
         self.assertEqual(config.display.power_helper, "relay-wlopm")
+        self.assertEqual(config.display.drm_compatibility, "legacy-drm")
         self.assertEqual(config.kiosk.resolved_compositor, "cage")
         self.assertEqual(config.policy.dpms_off_delay_ms, 9000)
         self.assertEqual(config.policy.power_state_stabilize_ms, 1000)
@@ -125,11 +128,27 @@ class ConfigTests(unittest.TestCase):
             config = load_config(config_path)
 
         self.assertEqual(config.display.output_name, "HDMI-A-1")
+        self.assertEqual(config.display.drm_compatibility, "auto")
         self.assertEqual(config.kiosk.resolved_compositor, "cage")
         self.assertTrue(config.input.forward_power_button)
         self.assertEqual(config.input.debounce_ms, 3000)
         self.assertEqual(config.policy.dpms_off_delay_ms, 7000)
         self.assertEqual(config.policy.shutdown_timeout_s, 120)
+
+    def test_invalid_display_drm_compatibility_raises(self) -> None:
+        content = VALID_CONFIG + textwrap.dedent(
+            """
+
+            [display]
+            drm_compatibility = "experimental"
+            """
+        )
+        with TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "config.toml"
+            config_path.write_text(content, encoding="utf-8")
+
+            with self.assertRaises(ConfigError):
+                load_config(config_path)
 
     def test_missing_required_key_raises(self) -> None:
         content = VALID_CONFIG.replace('console_backend = "spice"\n', "")

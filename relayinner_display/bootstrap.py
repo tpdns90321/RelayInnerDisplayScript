@@ -278,6 +278,7 @@ def render_sample_config() -> str:
         [display]
         output_name = ""
         power_helper = "wlr-randr"
+        drm_compatibility = "auto"  # legacy-drm also sets WLR_DRM_NO_ATOMIC=1; off disables relay overrides
 
         [input]
         power_button_event = "/dev/input/by-path/platform-i8042-serio-0-event-power"

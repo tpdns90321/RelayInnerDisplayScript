@@ -11,6 +11,8 @@ import tomllib
 SUPPORTED_CONSOLE_BACKENDS = {"spice", "vnc", "looking-glass", "moonlight"}
 SUPPORTED_KIOSK_COMPOSITORS = {"auto", "cage", "sway"}
 DEFAULT_KIOSK_COMPOSITOR = "auto"
+SUPPORTED_DISPLAY_DRM_COMPATIBILITY = {"auto", "off", "legacy-drm"}
+DEFAULT_DISPLAY_DRM_COMPATIBILITY = "auto"
 DEFAULT_RESOLVED_KIOSK_COMPOSITOR_BY_BACKEND = {
     "looking-glass": "cage",
     "moonlight": "sway",
@@ -77,6 +79,7 @@ class RuntimeConfig:
 class DisplayConfig:
     output_name: str = ""
     power_helper: str = "wlr-randr"
+    drm_compatibility: str = DEFAULT_DISPLAY_DRM_COMPATIBILITY
 
 
 @dataclass(frozen=True)
@@ -315,10 +318,7 @@ def parse_config(raw: dict[str, Any]) -> AppConfig:
     _require_child_path(runtime.run_dir, console.artifact_dir, "console.artifact_dir")
     _require_child_path(runtime.run_dir, runtime.spice_vv_path, "runtime.spice_vv_path")
 
-    display = DisplayConfig(
-        output_name=_optional_string(display_table, "output_name", default=""),
-        power_helper=_optional_non_empty_string(display_table, "power_helper", default="wlr-randr"),
-    )
+    display = _parse_display_config(display_table)
     kiosk = _parse_kiosk_config(target.console_backend, kiosk_table)
 
     input_config = InputConfig(
@@ -468,6 +468,26 @@ def _optional_absolute_path(table: dict[str, Any], key: str, default: Path) -> P
     if not path.is_absolute():
         raise ConfigError(f"{key!r} must be an absolute path")
     return path
+
+
+def _parse_display_config(table: dict[str, Any]) -> DisplayConfig:
+    drm_compatibility = _optional_non_empty_string(
+        table,
+        "drm_compatibility",
+        default=DEFAULT_DISPLAY_DRM_COMPATIBILITY,
+    )
+    if drm_compatibility not in SUPPORTED_DISPLAY_DRM_COMPATIBILITY:
+        supported = ", ".join(sorted(SUPPORTED_DISPLAY_DRM_COMPATIBILITY))
+        raise ConfigError(
+            "Unsupported display.drm_compatibility="
+            f"{drm_compatibility!r}; supported values: {supported}"
+        )
+
+    return DisplayConfig(
+        output_name=_optional_string(table, "output_name", default=""),
+        power_helper=_optional_non_empty_string(table, "power_helper", default="wlr-randr"),
+        drm_compatibility=drm_compatibility,
+    )
 
 
 def _parse_kiosk_config(backend: str, table: dict[str, Any]) -> KioskConfig:

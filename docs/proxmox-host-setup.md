@@ -31,6 +31,7 @@ When `console_backend = "moonlight"`, operators also need Linux `moonlight-qt` v
    - `[console.looking_glass].shm_file` plus any renderer or SPICE overrides when using `console_backend = "looking-glass"`
    - `[console.moonlight].host` plus any non-default `app`, `base_port`, `resolution`, or `state_dir` when using `console_backend = "moonlight"`
    - `[display].output_name` if you want to pin a specific connector name; on the managed sway path this also pins workspace `1` to that connector when it is currently connected
+   - `[display].drm_compatibility` only if you need to override the default wlroots DRM startup workaround; `auto` applies `WLR_DRM_NO_MODIFIERS=1`, `legacy-drm` also adds `WLR_DRM_NO_ATOMIC=1`, and `off` disables the relay-managed DRM compatibility env overrides
    - `[input].power_button_event` if the default evdev path does not match the host
 4. Start the services after editing the config:
 
@@ -131,6 +132,8 @@ quit_app_after_session = false
 With `compositor = "auto"`, the relay resolves Moonlight to the managed `sway` kiosk path. The other backends still resolve to `cage` unless you override that contract explicitly with a supported combination.
 
 On that managed sway path, the kiosk launcher writes `/run/relayinner-display/sway.config` on each kiosk start, launches `sway --config /run/relayinner-display/sway.config`, and does not load operator-owned or system sway config files. If `[display].output_name` is set, the launcher adds `workspace 1 output <name>` only when that connector is currently visible under `/sys/class/drm`; otherwise it logs a warning and lets sway continue with ordinary output selection.
+
+Before launching either `cage` or `sway`, the kiosk launcher also applies the shared `[display].drm_compatibility` policy through wlroots DRM env overrides. The default `auto` path sets `WLR_DRM_NO_MODIFIERS=1`, which can avoid some monitor-specific atomic modeset failures; `legacy-drm` also sets `WLR_DRM_NO_ATOMIC=1` as a stronger fallback, and `off` disables both relay-managed overrides.
 
 If you are enabling Moonlight on an existing relay install that previously resolved to `cage`, rerun `sudo ./install.sh` first so the host package set includes `sway` for the new resolved compositor.
 
@@ -242,6 +245,7 @@ The runtime state file now records the public appliance state and key fault mark
 
 - `appliance_state`
 - `kiosk_compositor`
+- `display_drm_compatibility`
 - `session_ready`
 - `vm_power_state`
 - `display_power_applied`
@@ -289,6 +293,8 @@ If the kiosk journal shows the `libseat` sequence `Could not connect to socket /
 If the kiosk journal shows `failed to open /dev/dri/renderD128: Permission denied`, `failed to open /dev/dri/card0: Permission denied`, or `Unable to create the wlroots renderer`, the kiosk service lacks the GPU groups required to open the DRM nodes. The installer now detects the owning groups for `/dev/dri/card*` and `/dev/dri/renderD*` and renders them into `SupplementaryGroups=` for `relayinner-display-kiosk.service`; rerun `sudo ./install.sh` and verify the unit contains the expected groups, typically `video render`.
 
 The managed kiosk unit also exports `LIBSEAT_BACKEND=seatd` so the resolved kiosk compositor uses the same backend as the successful transient `systemd-run` checks instead of depending on libseat backend auto-selection.
+
+If the kiosk journal shows repeated wlroots DRM modeset failures such as `Atomic commit failed: No space left on device` after a monitor change, keep `[display].drm_compatibility = "auto"` unless you have a reason to disable it. That default applies `WLR_DRM_NO_MODIFIERS=1` for both `cage` and `sway`. If the startup failure persists, try `[display].drm_compatibility = "legacy-drm"` to add `WLR_DRM_NO_ATOMIC=1` as a stronger compatibility fallback. Use `off` only when you need the relay to stop managing those wlroots DRM env overrides entirely.
 
 If `systemctl status relayinner-display-kiosk.service` briefly shows the child process as `/usr/bin/python3 /usr/local/lib/relayinner-display/session-entrypoint` before `cage` exits with `status=1`, the installed runtime is likely older than the absolute-path launcher hotfix. Refresh `/usr/local/lib/relayinner-display/relayinner_display/kiosk.py` with `sudo ./install.sh`; older copies tried to exec `relayinner-display-session` by bare name, which fails when `cage` does not preserve the kiosk unit `PATH`.
 

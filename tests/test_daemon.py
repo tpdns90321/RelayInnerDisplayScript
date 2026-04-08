@@ -2026,6 +2026,7 @@ class DisplayDaemonTests(unittest.TestCase):
         self.assertEqual(payload["appliance_state"], "reconnecting_console")
         self.assertEqual(payload["console_backend"], "spice")
         self.assertEqual(payload["kiosk_compositor"], "cage")
+        self.assertEqual(payload["display_drm_compatibility"], "auto")
         self.assertIsNone(payload["active_console_backend"])
         self.assertIsNone(payload["vnc_endpoint"])
         self.assertTrue(payload["session_ready"])
@@ -2049,6 +2050,7 @@ class DisplayDaemonTests(unittest.TestCase):
 
         self.assertEqual(payload["console_backend"], "vnc")
         self.assertEqual(payload["kiosk_compositor"], "cage")
+        self.assertEqual(payload["display_drm_compatibility"], "auto")
         self.assertEqual(payload["vnc_endpoint"], "127.0.0.1:5977")
 
     def test_state_file_includes_looking_glass_shm_file_for_backend(self) -> None:
@@ -2071,6 +2073,7 @@ class DisplayDaemonTests(unittest.TestCase):
 
         self.assertEqual(payload["console_backend"], "looking-glass")
         self.assertEqual(payload["kiosk_compositor"], "cage")
+        self.assertEqual(payload["display_drm_compatibility"], "auto")
         self.assertEqual(payload["looking_glass_shm_file"], str(shm_file))
 
     def test_state_file_includes_moonlight_app_for_backend(self) -> None:
@@ -2090,6 +2093,7 @@ class DisplayDaemonTests(unittest.TestCase):
 
         self.assertEqual(payload["console_backend"], "moonlight")
         self.assertEqual(payload["kiosk_compositor"], "sway")
+        self.assertEqual(payload["display_drm_compatibility"], "auto")
         self.assertEqual(payload["moonlight_app"], "Steam Big Picture")
         self.assertIsNone(payload["moonlight_resolution"])
 
@@ -2110,6 +2114,24 @@ class DisplayDaemonTests(unittest.TestCase):
 
         self.assertEqual(payload["console_backend"], "moonlight")
         self.assertEqual(payload["moonlight_resolution"], "1920x1080")
+
+    def test_state_file_includes_display_drm_compatibility_for_backend(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            config = build_config(
+                Path(temp_dir),
+                backend="spice",
+                display_drm_compatibility="legacy-drm",
+            )
+            daemon = DisplayDaemon(config=config, proxmox=FakeProxmoxClient(["stopped"]))
+            start_time = datetime(2026, 4, 8, 0, 0, tzinfo=timezone.utc)
+
+            daemon.prepare_runtime()
+            daemon.start(now=start_time)
+
+            payload = json.loads(config.runtime.daemon_state_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(payload["console_backend"], "spice")
+        self.assertEqual(payload["display_drm_compatibility"], "legacy-drm")
 
 
 def build_config(
@@ -2135,6 +2157,7 @@ def build_config(
     moonlight_quit_app_after_session: bool = False,
     output_name: str = "",
     power_helper: str = "wlr-randr",
+    display_drm_compatibility: str = "auto",
     dpms_off_delay_ms: int = 5000,
     power_state_stabilize_ms: int = 3000,
     forward_power_button: bool = False,
@@ -2192,6 +2215,7 @@ def build_config(
         display=DisplayConfig(
             output_name=output_name,
             power_helper=power_helper,
+            drm_compatibility=display_drm_compatibility,
         ),
         kiosk=KioskConfig(
             compositor=kiosk_compositor,

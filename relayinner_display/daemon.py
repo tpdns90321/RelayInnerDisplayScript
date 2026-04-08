@@ -235,6 +235,7 @@ class DisplayDaemon:
             node_name="",
             console_backend=config.target.console_backend,
             kiosk_compositor=config.kiosk.resolved_compositor,
+            display_drm_compatibility=config.display.drm_compatibility,
             vnc_endpoint=config.console.vnc.endpoint if config.console.vnc is not None else None,
             looking_glass_shm_file=(
                 str(config.console.looking_glass.shm_file)

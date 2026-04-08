@@ -37,6 +37,7 @@ class RuntimeState:
     node_name: str
     console_backend: str = "spice"
     kiosk_compositor: str | None = None
+    display_drm_compatibility: str | None = None
     active_console_backend: str | None = None
     vnc_endpoint: str | None = None
     looking_glass_shm_file: str | None = None
@@ -95,6 +96,7 @@ class RuntimeState:
             "node_name": self.node_name,
             "console_backend": self.console_backend,
             "kiosk_compositor": self.kiosk_compositor,
+            "display_drm_compatibility": self.display_drm_compatibility,
             "active_console_backend": self.active_console_backend,
             "vnc_endpoint": self.vnc_endpoint,
             "looking_glass_shm_file": self.looking_glass_shm_file,
