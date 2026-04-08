@@ -1466,6 +1466,40 @@ class DisplayDaemonTests(unittest.TestCase):
             "Moonlight version must be >= 6.0.0, found 5.0.1",
         )
 
+    def test_moonlight_startup_log_includes_resolved_compositor(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            config = build_config(Path(temp_dir), backend="moonlight")
+
+            def fake_command_runner(
+                command: list[str],
+                cwd: str | None = None,
+                text: bool = True,
+                capture_output: bool = True,
+                check: bool = False,
+                **_: object,
+            ) -> SimpleNamespace:
+                return SimpleNamespace(returncode=0, stdout="Moonlight 6.1.0\n", stderr="")
+
+            daemon = DisplayDaemon(
+                config=config,
+                proxmox=FakeProxmoxClient(["stopped"]),
+                dependency_finder=lambda name: f"/usr/bin/{Path(name).name}",
+                command_runner=fake_command_runner,
+            )
+            start_time = datetime(2026, 4, 8, 0, 0, tzinfo=timezone.utc)
+
+            daemon.prepare_runtime()
+            with self.assertLogs("relayinner-display.console", level="INFO") as captured:
+                daemon.start(now=start_time)
+
+        self.assertTrue(
+            any(
+                "Moonlight startup contract satisfied: backend=moonlight kiosk_compositor=sway"
+                in entry
+                for entry in captured.output
+            )
+        )
+
     def test_initial_off_state_waits_before_sleeping(self) -> None:
         with TemporaryDirectory() as temp_dir:
             config = build_config(

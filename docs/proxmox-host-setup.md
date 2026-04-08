@@ -50,6 +50,19 @@ Successful installer runs also rewrite `/var/lib/relayinner-display/install-stat
 
 The installer now selects compositor packages from the current config. If you later switch the resolved kiosk compositor from `cage` to `sway`, rerun `sudo ./install.sh` or install `sway` yourself before restarting the services.
 
+## Supported Backend and Compositor Matrix
+
+Use the following matrix as the supported kiosk contract:
+
+| console backend | supported compositor |
+| --- | --- |
+| `spice` | `cage` |
+| `vnc` | `cage` |
+| `looking-glass` | `cage` |
+| `moonlight` | `sway` |
+
+With `[kiosk].compositor = "auto"`, `moonlight` resolves to `sway` and the other backends resolve to `cage`. Moonlight on Cage and non-Moonlight backends on sway are not documented support targets in this MVP.
+
 ## VNC Backend
 
 Use `console_backend = "vnc"` only after the target VM has been prepared with a loopback-only VNC bind in Proxmox VM config. The supported shape is:
@@ -104,11 +117,12 @@ For the required host and guest preparation, follow the upstream documentation:
 
 ## Moonlight Backend
 
-Use `console_backend = "moonlight"` only after the guest already runs Sunshine and the Proxmox host already has Linux `moonlight-qt` version `6.0.0` or newer. Specs 30 through 32, Specs 40 through 41, and Specs 50 through 51 cover the backend contract, persistent workspace, PIN-assist pairing, Desktop fast-path behavior, optional client resolution override, direct `moonlight stream` launch, reconnect behavior, compositor selection, and the managed sway runtime:
+Use `console_backend = "moonlight"` only after the guest already runs Sunshine and the Proxmox host already has Linux `moonlight-qt` version `6.0.0` or newer. Specs 30 through 32, Specs 40 through 41, and Specs 50 through 52 cover the backend contract, persistent workspace, PIN-assist pairing, Desktop fast-path behavior, optional client resolution override, direct `moonlight stream` launch, reconnect behavior, compositor selection, the managed sway runtime, and the explicit support matrix:
 
 - the installer does not configure Sunshine inside the guest
 - the relay does not store Sunshine usernames or passwords
 - this path targets Linux `moonlight-qt`, not mobile clients or browser flows
+- the supported Moonlight compositor path is the managed `sway` kiosk runtime
 
 Configure the relay like this:
 
@@ -263,6 +277,12 @@ When VNC, Looking Glass, or Moonlight is selected, the same state file also incl
 - `moonlight_pair_state`
 - `moonlight_pair_pin` while pairing approval is pending
 
+For support-matrix verification before deeper backend debugging, expect:
+
+- `kiosk_compositor = "sway"` when `console_backend = "moonlight"`
+- `kiosk_compositor = "cage"` when `console_backend` is `spice`, `vnc`, or `looking-glass`
+- a `relayinner-display.console` startup line for Moonlight that includes `backend=moonlight` and `kiosk_compositor=sway`
+
 If power-button forwarding is enabled, confirm the logind override is active:
 
 ```sh
@@ -288,6 +308,13 @@ Then inspect journald by subsystem:
 - `relayinner-display.input` for host power-button validation or evdev read failures
 - `relayinner-display.session` for session connection and state-transition events
 
+For Moonlight specifically, classify failures in this order before changing multiple things at once:
+
+1. Compositor or output setup: confirm the state file and startup logs show `console_backend=moonlight` with `kiosk_compositor=sway`, then check sway startup warnings, seatd, DRM permissions, and output pinning.
+2. Pairing: if `appliance_state=waiting_for_pairing`, work from `moonlight_pair_state`, `moonlight_pair_pin`, and the fullscreen Moonlight pair UI first.
+3. App validation: if pairing is complete but the appliance degrades before stream launch, compare `moonlight_app` with live `moonlight list <host-authority> --csv` output.
+4. Stream launch or reconnect: once startup, pairing, and app validation are healthy, use `relayinner-display.console` lines plus `last_console_exit` to debug repeated Moonlight exits or reconnect loops.
+
 If the kiosk journal shows the `libseat` sequence `Could not connect to socket /run/seatd.sock: Permission denied`, `Could not open target tty: Permission denied`, `Timeout waiting session to become active`, or `Unable to create the wlroots backend`, confirm the installed kiosk unit launches `/usr/local/lib/relayinner-display/relayinner-display-kiosk` and that `relayinner-display-seatd.service` is up with the relay group owning `/run/seatd.sock`. Older installs that still launch `seatd-launch -- cage -- ...` or embed `cage -- /usr/local/lib/relayinner-display/session-entrypoint` directly can fail immediately or drift from the current compositor-selection contract; rerun `sudo ./install.sh` to refresh the units before debugging further. If `relayinner-display-seatd.service` instead fails with `Failed at step EXEC spawning /usr/bin/seatd`, rerun `sudo ./install.sh` so the installer refreshes the seatd unit with the actual host binary path, such as `/usr/sbin/seatd`, then restart `relayinner-display-seatd.service`, `relayinner-displayd.service`, and `relayinner-display-kiosk.service`.
 
 If the kiosk journal shows `failed to open /dev/dri/renderD128: Permission denied`, `failed to open /dev/dri/card0: Permission denied`, or `Unable to create the wlroots renderer`, the kiosk service lacks the GPU groups required to open the DRM nodes. The installer now detects the owning groups for `/dev/dri/card*` and `/dev/dri/renderD*` and renders them into `SupplementaryGroups=` for `relayinner-display-kiosk.service`; rerun `sudo ./install.sh` and verify the unit contains the expected groups, typically `video render`.
@@ -302,7 +329,7 @@ If the kiosk journal warns that a requested output pin is unavailable at sway st
 
 If `runuser -u relayinner-display -- /usr/local/lib/relayinner-display/session-entrypoint` or the kiosk journal shows `PermissionError: [Errno 13] Permission denied: '/etc/relayinner-display/config.toml'`, the session user cannot read the preserved host config. Refresh the install with `sudo ./install.sh`; the current installer normalizes `/etc/relayinner-display/` to service-group-readable permissions so the unprivileged kiosk session can load the same config as the root daemon.
 
-If the display helper logs `Wayland server does not support wlr-output-power-management-v1`, the host is still configured for `wlopm`. Cage supports output management through `wlr-randr` more broadly than it supports the `wlopm` protocol, so rerun `sudo ./install.sh` and keep `power_helper = "wlr-randr"` unless you have confirmed `wlopm` support on that compositor build.
+If the display helper logs `Wayland server does not support wlr-output-power-management-v1`, the host is still configured for `wlopm`. The relay-managed wlroots kiosk paths support output management through `wlr-randr` more broadly than through the `wlopm` protocol, so rerun `sudo ./install.sh` and keep `power_helper = "wlr-randr"` unless you have confirmed `wlopm` support on that compositor build.
 
 If the daemon logs `Prepared console launch for VM ... with backend=spice` and `Console started: backend=spice pid=...` but the viewer immediately closes with a dialog like `Unable to connect graphic server /run/relayinner-display/console/spice-current.vv`, inspect the generated `.vv` file. Proxmox returns the `ca` certificate with escaped newlines, and the relay writer must keep that value escaped on one `ca=...` line; literal embedded newlines break the INI format and can cause `remote-viewer` to fail before the SPICE session opens.
 
@@ -316,6 +343,6 @@ If Looking Glass reconnects repeatedly while the guest stays up, inspect the con
 
 If the state file shows `appliance_state=waiting_for_pairing`, open the Sunshine web UI on the guest-side host, go to the `PIN` page, and enter the current `moonlight_pair_pin` shown by Moonlight's pairing UI or in `/run/relayinner-display/daemon.state.json`. The relay rotates that PIN after 300 seconds if approval has not completed yet.
 
-If the state file or journal shows `console_backend=moonlight` and the appliance moves into `degraded`, verify that Linux `moonlight-qt` `6.0.0` or newer is installed, that `[console.moonlight].host`, `base_port`, `app`, and optional `resolution` point at the expected Sunshine host and app, and that the configured `state_dir` plus `portable.dat` are present and writable by the `relayinner-display` session user. If `app = "Desktop"`, confirm that `/run/relayinner-display/daemon.state.json` still reports `moonlight_pair_state = "paired"` and focus on stream/session failures. If `app` names another Sunshine entry, check `moonlight_app` in the state file against `moonlight list <host-authority> --csv`; the relay matches app names case-insensitively but requires an exact app-name match, and `quit_app_after_session = true` is only valid for non-`Desktop` apps. `moonlight_resolution` in the same state file shows the configured requested override rather than a measured negotiated stream mode.
+If the state file or journal shows `console_backend=moonlight` and the appliance moves into `degraded`, first confirm that the same state file still reports `kiosk_compositor = "sway"`; if it does not, fix the compositor-selection or install drift before debugging Moonlight itself. Then verify that Linux `moonlight-qt` `6.0.0` or newer is installed, that `[console.moonlight].host`, `base_port`, `app`, and optional `resolution` point at the expected Sunshine host and app, and that the configured `state_dir` plus `portable.dat` are present and writable by the `relayinner-display` session user. If `app = "Desktop"`, confirm that `/run/relayinner-display/daemon.state.json` still reports `moonlight_pair_state = "paired"` and focus on stream/session failures. If `app` names another Sunshine entry, check `moonlight_app` in the state file against `moonlight list <host-authority> --csv`; the relay matches app names case-insensitively but requires an exact app-name match, and `quit_app_after_session = true` is only valid for non-`Desktop` apps. `moonlight_resolution` in the same state file shows the configured requested override rather than a measured negotiated stream mode.
 
 If Moonlight reconnects repeatedly while the VM stays running, inspect `relayinner-display.console` log lines for `backend=moonlight` and confirm that the Sunshine host is still reachable and that the configured app still exists in the live Sunshine app list. The relay re-validates both before each relaunch.

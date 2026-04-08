@@ -143,14 +143,17 @@ class BootstrapTests(unittest.TestCase):
 
     def test_render_sample_config_matches_checked_in_example_and_is_valid(self) -> None:
         repo_root = Path(__file__).resolve().parents[1]
+        sample_config = render_sample_config()
         self.assertEqual(
             (repo_root / "config.example.toml").read_text(encoding="utf-8"),
-            render_sample_config(),
+            sample_config,
         )
+        self.assertIn("# - spice, vnc, looking-glass -> cage", sample_config)
+        self.assertIn("# - moonlight -> sway", sample_config)
 
         with TemporaryDirectory() as temp_dir:
             config_path = Path(temp_dir) / "config.toml"
-            config_path.write_text(render_sample_config(), encoding="utf-8")
+            config_path.write_text(sample_config, encoding="utf-8")
             config = load_config(config_path)
 
         self.assertTrue(config.input.forward_power_button)

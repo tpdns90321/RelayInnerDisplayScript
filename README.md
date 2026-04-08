@@ -6,7 +6,7 @@ The target outcome is a small appliance-like runtime that takes one VM managed b
 
 ## Status
 
-This repository now includes Specs 10 through 17 of the current MVP plan, Specs 20 through 22 for the implemented console-backend expansion series, Specs 30 through 32 for the completed Moonlight client slice, Specs 40 through 41 for the implemented Moonlight hardening plus client-resolution follow-ups, Specs 50 through 51 for the implemented kiosk compositor-selection and managed sway runtime contracts, and Spec 52 for the remaining Moonlight-on-sway support-matrix follow-up.
+This repository now includes Specs 10 through 17 of the current MVP plan, Specs 20 through 22 for the implemented console-backend expansion series, Specs 30 through 32 for the completed Moonlight client slice, Specs 40 through 41 for the implemented Moonlight hardening plus client-resolution follow-ups, and Specs 50 through 52 for the implemented kiosk compositor-selection, managed sway runtime, and Moonlight-on-sway support-matrix contracts.
 
 - The MVP architecture and behavior are defined in `./specs`.
 - Spec 10 now has a Python implementation for config loading, daemon/session IPC, local Proxmox command wrappers, SPICE `.vv` generation, and reconnect state handling.
@@ -27,7 +27,7 @@ This repository now includes Specs 10 through 17 of the current MVP plan, Specs 
 - Spec 41 now implements the Moonlight client-resolution follow-up: an optional `config.toml` resolution override that maps to Moonlight's `--resolution <width>x<height>` launch flag and `moonlight_resolution` runtime diagnostics.
 - Spec 50 now adds the kiosk compositor-selection contract: `[kiosk].compositor`, backend-specific auto resolution, early backend/compositor validation, a relay-managed kiosk launcher, and `kiosk_compositor` in runtime diagnostics.
 - Spec 51 now adds the managed sway kiosk runtime: a generated `/run/relayinner-display/sway.config`, output-aware workspace pinning, startup warnings for unavailable pinned outputs, and compositor-specific package selection during install.
-- Spec 52 remains the next Wave 5 follow-up for the Moonlight-on-sway support matrix and operator guidance.
+- Spec 52 now formalizes the supported compositor matrix, updates operator guidance, and makes Moonlight startup logs include the resolved kiosk compositor alongside `backend=moonlight`.
 - The current design still assumes direct installation on a Proxmox host, not an LXC container.
 
 ## Quickstart
@@ -63,6 +63,19 @@ sudo cat /var/lib/relayinner-display/install-state.json
 For the full operator procedure, package assumptions, managed paths, troubleshooting commands, and installer flag details, see [`./docs/proxmox-host-setup.md`](./docs/proxmox-host-setup.md).
 
 If you later change the resolved kiosk compositor from the default `cage` path to `sway`, rerun `sudo ./install.sh` or install `sway` yourself before restarting the services. The installer now selects host compositor packages from the current config instead of always installing both paths.
+
+## Supported Backend and Compositor Matrix
+
+The supported kiosk combinations after Spec 52 are:
+
+| console backend | supported compositor |
+| --- | --- |
+| `spice` | `cage` |
+| `vnc` | `cage` |
+| `looking-glass` | `cage` |
+| `moonlight` | `sway` |
+
+With `[kiosk].compositor = "auto"`, `moonlight` resolves to `sway` and the other backends resolve to `cage`. Treat that matrix as the supported operator contract rather than an experimental menu of equivalent compositor choices.
 
 When `console_backend = "moonlight"` and the Sunshine host is reachable but not yet paired, the kiosk now enters `waiting_for_pairing`, launches Moonlight's pairing UI fullscreen with a 4-digit PIN, and resumes automatically after you approve that PIN in the Sunshine web UI `PIN` page on the guest. The daemon keeps polling pairing completion while that pairing UI is still open by watching the managed Moonlight workspace for the paired-host record that Moonlight persists on success, so a successful approval advances into the configured stream without requiring a manual kiosk click or a service restart. The active PIN is also mirrored in `/run/relayinner-display/daemon.state.json` while approval is pending. Once paired, the daemon launches `Desktop` directly from that paired workspace state and only runs `moonlight list --csv` for non-`Desktop` apps that need catalog validation. If `[console.moonlight].resolution` is set, the relay injects `--resolution <width>x<height>` on every relay-managed `moonlight stream` launch and mirrors that requested value into `moonlight_resolution` in the runtime state file. Daemon-side Moonlight helper checks now run with a headless Qt platform so they do not try to grab DRM/KMS outside the kiosk session, and they still honor `[policy].command_timeout_s` as a final guardrail. This relay slice does not store Sunshine usernames or passwords. The runtime now also records the resolved kiosk compositor in `kiosk_compositor`, so `moonlight + auto` is visible as `sway` while `spice|vnc|looking-glass + auto` stay visible as `cage`.
 
@@ -211,7 +224,7 @@ Console-backend expansion status:
 - Wave 2 is complete: Spec 21 now owns the shipped VNC path, and Spec 22 now ships the preflight-only Looking Glass path on the same shared contract.
 - Wave 3 is complete: Specs 30 through 32 now ship the Moonlight backend contract, persistent pairing workspace, live app-list validation, fullscreen stream launch, and reconnect behavior for Sunshine-backed guests.
 - Wave 4 now contains the implemented Spec 40 hardening pass plus the implemented Spec 41 config-surface follow-up for client resolution overrides.
-- Wave 5 is in progress: Specs 50 through 51 now ship the compositor-selection and managed sway runtime contracts, and Spec 52 remains for the Moonlight-on-sway support matrix.
+- Wave 5 is complete: Specs 50 through 52 now ship the compositor-selection, managed sway runtime, and Moonlight-on-sway support matrix plus operator guidance.
 
 ## Expected Host Dependencies
 
@@ -275,7 +288,7 @@ After the project is installed, the intended flow is:
 1. Install the runtime on a Proxmox host that has a directly attached monitor.
 2. Configure one target `vmid`.
 3. Reboot or start the services.
-4. The host enters a Cage kiosk session automatically.
+4. The host enters the resolved kiosk session automatically: `cage` for SPICE, VNC, and Looking Glass, and `sway` for Moonlight under the default `auto` contract.
 5. If the VM is running, the guest appears fullscreen.
 6. If the VM is off, the display waits briefly and then sleeps.
 7. Pressing the host power button starts the VM when it is off, or requests graceful shutdown when it is on.
