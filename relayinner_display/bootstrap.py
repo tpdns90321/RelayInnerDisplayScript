@@ -214,9 +214,6 @@ def render_sample_config() -> str:
 
         [kiosk]
         compositor = "auto"
-        # Supported compositor matrix under the current ops contract:
-        # - spice, vnc, looking-glass -> cage
-        # - moonlight -> sway
 
         [console]
         artifact_dir = "/run/relayinner-display/console"
@@ -247,17 +244,15 @@ def render_sample_config() -> str:
         # To use the Moonlight backend instead, set console_backend = "moonlight",
         # install Linux moonlight-qt 6.0.0 or newer yourself, and point host at a
         # Sunshine guest that you prepared outside this installer. If the host is
-        # reachable but unpaired, the kiosk shows a PIN for the Sunshine web UI
-        # PIN page; no extra relay config keys or stored Sunshine credentials are
-        # needed. Moonlight on sway is the supported kiosk path; with
-        # kiosk.compositor = "auto", Moonlight resolves to sway while spice, vnc,
-        # and looking-glass keep the cage path. The relay launches paired Desktop
-        # streams directly from the managed workspace state, validates other app
-        # names against the live Sunshine app list case-insensitively, and
-        # reconnects if Moonlight exits unexpectedly while the VM remains running.
-        # The managed sway runtime writes /run/relayinner-display/sway.config on
-        # each kiosk start; treat that file as generated runtime state, not
-        # operator config.
+        # reachable but unpaired, the kiosk shows a PIN for the Sunshine web UI PIN
+        # page; no extra relay config keys or stored Sunshine credentials are needed.
+        # The relay launches paired Desktop streams directly from the managed workspace
+        # state, validates other app names against the live Sunshine app list
+        # case-insensitively, and reconnects if Moonlight exits unexpectedly while the
+        # VM remains running. With kiosk.compositor = "auto", Moonlight resolves to
+        # the sway kiosk path while spice, vnc, and looking-glass keep the cage path.
+        # The managed sway runtime writes /run/relayinner-display/sway.config on each
+        # kiosk start; treat that file as generated runtime state, not operator config.
         #
         # [console.moonlight]
         # binary = "moonlight"

@@ -1523,8 +1523,7 @@ class DisplayDaemon:
         if moonlight is None:
             raise AssertionError("Moonlight backend selected without console.moonlight config")
         self.console_logger.info(
-            "Moonlight startup contract satisfied: backend=moonlight kiosk_compositor=%s host=%s workspace=%s binary=%s",
-            self.config.kiosk.resolved_compositor,
+            "Moonlight startup contract satisfied: host=%s workspace=%s binary=%s",
             moonlight.host_authority,
             moonlight.state_dir,
             moonlight.binary,
