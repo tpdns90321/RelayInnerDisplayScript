@@ -863,11 +863,17 @@ class DisplayDaemon:
 
         self.next_reconnect_at = None
         if self._moonlight_workspace_host_is_paired():
-            self._set_moonlight_pair_state(MoonlightPairState.PAIRED)
-            self.state.moonlight_pair_pin = None
-            self.moonlight_pair_requested_at = None
-            self.moonlight_pair_launch_pending = False
-            self.state.last_error = None
+            self._mark_moonlight_as_paired()
+            return False, []
+        if (
+            self._moonlight_workspace_contains_paired_host()
+            and self._moonlight_host_reuses_existing_pairing()
+        ):
+            self.console_logger.info(
+                "Recovered Moonlight paired state for configured host=%s via live probe after workspace host mismatch",
+                moonlight.host_authority,
+            )
+            self._mark_moonlight_as_paired()
             return False, []
 
         should_issue_pair = (
@@ -925,6 +931,13 @@ class DisplayDaemon:
                 state.value,
             )
         self.state.moonlight_pair_state = state
+
+    def _mark_moonlight_as_paired(self) -> None:
+        self._set_moonlight_pair_state(MoonlightPairState.PAIRED)
+        self.state.moonlight_pair_pin = None
+        self.moonlight_pair_requested_at = None
+        self.moonlight_pair_launch_pending = False
+        self.state.last_error = None
 
     def _clear_moonlight_pair_state(self) -> None:
         self.state.moonlight_pair_pin = None
@@ -1000,6 +1013,9 @@ class DisplayDaemon:
                 return [section_records[index] for index in sorted(section_records)]
         return []
 
+    def _moonlight_workspace_contains_paired_host(self) -> bool:
+        return any(record.get("srvcert", "").strip() for record in self._moonlight_workspace_host_records())
+
     def _moonlight_workspace_record_matches_host(
         self,
         record: dict[str, str],
@@ -1044,6 +1060,22 @@ class DisplayDaemon:
             raise AssertionError("Moonlight backend selected without console.moonlight config")
 
         return moonlight.app.strip().casefold() == DEFAULT_MOONLIGHT_APP.casefold()
+
+    def _moonlight_host_reuses_existing_pairing(self) -> bool:
+        moonlight = self.config.console.moonlight
+        if moonlight is None:
+            raise AssertionError("Moonlight backend selected without console.moonlight config")
+
+        try:
+            self._moonlight_list_apps()
+        except RuntimeValidationError as exc:
+            self.console_logger.info(
+                "Moonlight live probe did not confirm existing pairing for host=%s: %s",
+                moonlight.host_authority,
+                exc,
+            )
+            return False
+        return True
 
     def _moonlight_list_apps(self) -> list[str]:
         moonlight = self.config.console.moonlight

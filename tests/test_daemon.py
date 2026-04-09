@@ -1256,6 +1256,82 @@ class DisplayDaemonTests(unittest.TestCase):
         self.assertEqual(daemon.state.session_state, SessionState.REQUESTING_CONSOLE)
         self.assertEqual(daemon.state.moonlight_pair_state, MoonlightPairState.PAIRED)
 
+    def test_moonlight_desktop_stream_reuses_existing_pairing_after_host_change(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            state_dir = Path(temp_dir) / "moonlight-state"
+            config = build_config(
+                Path(temp_dir),
+                backend="moonlight",
+                moonlight_host="192.168.50.21",
+                moonlight_state_dir=state_dir,
+            )
+            moonlight_commands: list[tuple[list[str], str | None]] = []
+
+            def fake_command_runner(
+                command: list[str],
+                cwd: str | None = None,
+                text: bool = True,
+                capture_output: bool = True,
+                check: bool = False,
+                **kwargs: object,
+            ) -> SimpleNamespace:
+                moonlight_commands.append((command, cwd))
+                if command == ["/usr/bin/moonlight", "--version"]:
+                    self.assertEqual(kwargs["timeout"], 10)
+                    return SimpleNamespace(returncode=0, stdout="Moonlight 6.1.0\n", stderr="")
+                if command == ["/usr/bin/moonlight", "list", "192.168.50.21", "--csv"]:
+                    self.assertEqual(kwargs["timeout"], 10)
+                    return SimpleNamespace(
+                        returncode=0,
+                        stdout=moonlight_app_list_csv("Desktop"),
+                        stderr="",
+                    )
+                raise AssertionError(f"Unexpected Moonlight command: {command}")
+
+            daemon = DisplayDaemon(
+                config=config,
+                proxmox=FakeProxmoxClient(["running"]),
+                dependency_finder=lambda name: f"/usr/bin/{Path(name).name}",
+                command_runner=fake_command_runner,
+                tcp_connect_probe=lambda host, port, timeout_s: None,
+            )
+            start_time = datetime(2026, 4, 9, 0, 0, tzinfo=timezone.utc)
+
+            daemon.prepare_runtime()
+            write_moonlight_host_settings(state_dir, "192.168.50.20")
+            daemon.start(now=start_time)
+            daemon.handle_session_message({"type": "session_ready"}, now=start_time)
+            actions = daemon.tick(now=start_time)
+
+        self.assertEqual(
+            actions,
+            [
+                {
+                    "type": "connect_console",
+                    "backend": "moonlight",
+                    "launcher": "moonlight",
+                    "cwd": str(state_dir),
+                    "argv": [
+                        "moonlight",
+                        "stream",
+                        "192.168.50.21",
+                        "Desktop",
+                        "--display-mode",
+                        "fullscreen",
+                    ],
+                }
+            ],
+        )
+        self.assertEqual(daemon.state.session_state, SessionState.REQUESTING_CONSOLE)
+        self.assertEqual(daemon.state.moonlight_pair_state, MoonlightPairState.PAIRED)
+        self.assertEqual(
+            moonlight_commands,
+            [
+                (["/usr/bin/moonlight", "--version"], None),
+                (["/usr/bin/moonlight", "list", "192.168.50.21", "--csv"], str(state_dir)),
+            ],
+        )
+
     def test_moonlight_non_desktop_list_timeout_enters_degraded_without_clearing_pair_state(
         self,
     ) -> None:
