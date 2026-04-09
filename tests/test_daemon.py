@@ -169,14 +169,24 @@ def write_moonlight_host_settings(
     port: int = 47989,
     paired: bool = True,
     section: str = "hosts",
+    include_general_section: bool = False,
+    quote_bytearray_values: bool = False,
     client_certificate: str | None = None,
     client_key: str | None = None,
 ) -> Path:
+    def render_qsettings_bytearray(value: str) -> str:
+        rendered = f"@ByteArray({value})"
+        if quote_bytearray_values:
+            return f'"{rendered}"'
+        return rendered
+
     lines: list[str] = []
+    if include_general_section and (client_certificate is not None or client_key is not None):
+        lines.append("[General]")
     if client_certificate is not None:
-        lines.append(f"certificate=@ByteArray({client_certificate})")
+        lines.append(f"certificate={render_qsettings_bytearray(client_certificate)}")
     if client_key is not None:
-        lines.append(f"key=@ByteArray({client_key})")
+        lines.append(f"key={render_qsettings_bytearray(client_key)}")
     if lines:
         lines.append("")
     lines.extend(
@@ -189,7 +199,7 @@ def write_moonlight_host_settings(
         ]
     )
     if paired:
-        lines.append("1\\srvcert=@ByteArray(dummy-cert)")
+        lines.append(f"1\\srvcert={render_qsettings_bytearray('dummy-cert')}")
 
     settings_path = state_dir / "Moonlight.ini"
     state_dir.mkdir(parents=True, exist_ok=True)
@@ -942,6 +952,71 @@ class DisplayDaemonTests(unittest.TestCase):
             result = daemon._probe_moonlight_pair_state("192.168.50.20", False)
 
         self.assertEqual(result, "unpaired")
+        self.assertEqual(
+            requests,
+            [
+                (47989, False, None),
+                (47984, True, ("client\ncert", "client\nkey")),
+            ],
+        )
+
+    def test_moonlight_live_pair_probe_reads_general_section_and_quoted_bytearrays(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            state_dir = Path(temp_dir) / "moonlight-state"
+            config = build_config(
+                Path(temp_dir),
+                backend="moonlight",
+                moonlight_state_dir=state_dir,
+            )
+            daemon = DisplayDaemon(
+                config=config,
+                proxmox=FakeProxmoxClient(["running"]),
+                dependency_finder=lambda name: f"/usr/bin/{Path(name).name}",
+                command_runner=lambda command, cwd=None, text=True, capture_output=True, check=False, **_: (
+                    SimpleNamespace(returncode=0, stdout="Moonlight 6.1.0\n", stderr="")
+                ),
+                tcp_connect_probe=lambda host, port, timeout_s: None,
+            )
+            daemon.prepare_runtime()
+            write_moonlight_host_settings(
+                state_dir,
+                "192.168.50.20",
+                include_general_section=True,
+                quote_bytearray_values=True,
+                client_certificate="client\\ncert",
+                client_key="client\\nkey",
+            )
+            requests: list[tuple[int, bool, tuple[str, str] | None]] = []
+
+            def fake_request(
+                *,
+                host: str,
+                port: int,
+                host_authority: str,
+                server_certificate: str | None = None,
+                client_credentials: tuple[str, str] | None = None,
+            ) -> str:
+                requests.append((port, server_certificate is not None, client_credentials))
+                self.assertEqual(host, "192.168.50.20")
+                self.assertEqual(host_authority, "192.168.50.20")
+                if server_certificate is None:
+                    return (
+                        '<root status_code="200" status_message="OK">'
+                        "<HttpsPort>47984</HttpsPort>"
+                        "<PairStatus>0</PairStatus>"
+                        "</root>"
+                    )
+                self.assertEqual(server_certificate, "dummy-cert")
+                return (
+                    '<root status_code="200" status_message="OK">'
+                    "<PairStatus>1</PairStatus>"
+                    "</root>"
+                )
+
+            daemon._request_moonlight_serverinfo = fake_request  # type: ignore[method-assign]
+            result = daemon._probe_moonlight_pair_state("192.168.50.20", False)
+
+        self.assertEqual(result, "paired")
         self.assertEqual(
             requests,
             [

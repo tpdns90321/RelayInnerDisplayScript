@@ -1112,7 +1112,11 @@ class DisplayDaemon:
                 if line.startswith("[") and line.endswith("]"):
                     active_section = line[1:-1].strip().casefold()
                     continue
-                if active_section is not None:
+                # Qt's INI-backed QSettings can persist ungrouped keys either at
+                # the file root or under [General]. Accept both layouts so live
+                # pair validation can read Moonlight's client credentials across
+                # real-world packaging variants.
+                if active_section not in (None, "general"):
                     continue
 
                 key, separator, value = line.partition("=")
@@ -1164,6 +1168,8 @@ class DisplayDaemon:
 
     def _decode_moonlight_qsettings_bytearray(self, value: str) -> str | None:
         encoded = value.strip()
+        if len(encoded) >= 2 and encoded[0] == encoded[-1] and encoded[0] in {"'", '"'}:
+            encoded = encoded[1:-1].strip()
         if not encoded:
             return None
         if encoded.startswith("@ByteArray(") and encoded.endswith(")"):
