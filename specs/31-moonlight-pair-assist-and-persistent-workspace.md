@@ -22,7 +22,7 @@ At the same time, this project should not make Sunshine web-UI credentials part 
 
 Goals:
 
-- Persist Moonlight client identity and paired-host state in a relay-managed workspace.
+- Persist Moonlight client identity and pinned-host state in a relay-managed workspace.
 - Initiate Moonlight pairing automatically when the configured Sunshine host is reachable but not yet paired.
 - Show the active pairing PIN on the kiosk waiting screen and in runtime state.
 - Confirm pairing completion without depending on translated stderr text.
@@ -52,6 +52,7 @@ Managed workspace contract:
 - The daemon creates `state_dir` on startup if it does not already exist.
 - The daemon ensures `state_dir/portable.dat` exists before any Moonlight CLI action.
 - All Moonlight CLI commands for this backend, including daemon-side `pair` and `list` checks, execute as the unprivileged relay session user with `cwd = state_dir`.
+- Live pair-validation probes reuse the same workspace identity material and pinned-host data that Moonlight persists under `state_dir`.
 
 Host reachability contract:
 
@@ -60,16 +61,17 @@ Host reachability contract:
 
 Pair completion contract:
 
-- Pair completion is defined as the managed workspace containing a host record that matches `host` and `base_port` and includes Moonlight's persisted server certificate material.
-- The relay must not infer pair completion by parsing translated stderr text or by assuming that `moonlight list` availability is equivalent to pairing state.
+- Pair completion is defined as the configured Sunshine host returning `PairStatus = 1` from a live authenticated `serverinfo` probe.
+- The relay uses the managed workspace only as the source of Moonlight client identity and pinned-host certificate material needed to perform that authenticated probe.
+- The relay must not infer pair completion by parsing translated stderr text, by assuming that `moonlight list` availability is equivalent to pairing state, or by trusting a persisted `srvcert` record by itself.
 
 Pair-assist flow:
 
-1. If the host is reachable, the daemon inspects the managed Moonlight workspace for a matching paired-host record.
-2. If that paired-host record already exists, the host is treated as paired and the PIN-assist flow is skipped.
-3. If the record does not exist while the host remains reachable, the daemon generates a 4-digit PIN and runs `moonlight pair <host-authority> --pin <pin>` in the kiosk session.
-4. After the pair command is issued, the daemon enters `waiting_for_pairing` and keeps polling the managed workspace for the paired-host record that Moonlight persists on success.
-5. When that paired-host record appears, the daemon clears the active PIN and transitions to the ordinary console-launch path.
+1. If the host is reachable, the daemon uses the managed Moonlight workspace to perform a live pair-state probe against the configured host.
+2. If that live probe reports `PairStatus = 1`, the host is treated as paired and the PIN-assist flow is skipped.
+3. If the live probe reports unpaired, or if the workspace lacks the client credentials and pinned-host material required for the probe, the daemon generates a 4-digit PIN and runs `moonlight pair <host-authority> --pin <pin>` in the kiosk session.
+4. After the pair command is issued, the daemon enters `waiting_for_pairing` and keeps polling the live pair-state probe while the pairing UI remains active.
+5. When that live probe starts reporting `PairStatus = 1`, the daemon clears the active PIN and transitions to the ordinary console-launch path.
 
 PIN lifecycle rules:
 
@@ -107,6 +109,8 @@ Runtime state additions:
 - `pending_pin_approval`
 - `paired`
 
+`moonlight_pair_state = "paired"` means the last live authenticated pair-state probe confirmed `PairStatus = 1`.
+
 ## Data model / Persistence
 
 Persistent data:
@@ -126,7 +130,7 @@ Relay-managed persistent artifacts in `state_dir`:
 
 Moonlight-managed persistent artifacts in `state_dir`:
 
-- QSettings host records
+- QSettings host records, including pinned Sunshine certificate material
 - Moonlight client identity material
 - Moonlight cache files
 
@@ -145,7 +149,7 @@ Permissions:
 
 Isolation:
 
-- The relay uses only the curated Moonlight CLI actions required for this flow: `pair` and `list`.
+- The relay uses only the curated Moonlight CLI actions required for this flow: `pair` and `list`, plus live Sunshine `serverinfo` probes bootstrapped from Moonlight-managed credentials.
 - The relay must not introspect or modify Moonlight's internal settings store beyond creating `portable.dat` and the parent directory.
 - The relay must not issue authenticated Sunshine API requests in this spec.
 
@@ -161,6 +165,7 @@ Audit:
 - The waiting view shows the active PIN and operator instructions.
 - After the operator approves the PIN in the Sunshine web UI, the relay detects successful pairing without a service restart.
 - After pairing succeeds once, the same host remains paired across later service restarts because the workspace is persistent.
+- A workspace `srvcert` record by itself never counts as completed pairing.
 - If the host becomes unreachable during a pending pairing episode, the relay leaves `waiting_for_pairing`, clears the active PIN, and returns to reconnect flow.
 
 ## Test plan
@@ -178,7 +183,8 @@ Pair-assist behavior:
 - host reachable and not paired
 - host unreachable
 - pending pairing timeout at 300 seconds
-- pairing completes after one or more polling cycles
+- pairing completes after one or more live polling cycles
+- stale workspace host record does not skip pairing by itself
 
 IPC and state behavior:
 
@@ -188,8 +194,8 @@ IPC and state behavior:
 
 Restart behavior:
 
-- paired workspace survives daemon restart
-- restart does not regenerate a PIN when the managed workspace already contains the paired-host record
+- Moonlight workspace survives daemon restart
+- restart does not regenerate a PIN when the next live pair-state probe still reports paired
 
 ## Rollout / Backward compatibility
 

@@ -1,6 +1,6 @@
 # RelayInnerDisplayScript Specs
 
-This directory contains the current MVP spec set, the implemented console-backend expansion series, the completed Moonlight client series, the first Moonlight hardening follow-up plus the next config-surface follow-up, and the implemented Wave 5 compositor-selection plus managed sway runtime contracts for a Proxmox-hosted display relay appliance that mirrors one KVM guest directly onto a host-attached monitor.
+This directory contains the current MVP spec set, the implemented console-backend expansion series, the completed Moonlight client series, the implemented Moonlight hardening and live-pair-validation follow-ups, and the implemented Wave 5 compositor-selection plus managed sway runtime contracts for a Proxmox-hosted display relay appliance that mirrors one KVM guest directly onto a host-attached monitor.
 
 ## Spec Index
 
@@ -23,6 +23,7 @@ This directory contains the current MVP spec set, the implemented console-backen
 - `50-kiosk-compositor-selection-contract.md`
 - `51-managed-sway-kiosk-runtime.md`
 - `52-moonlight-on-sway-support-matrix-and-ops.md`
+- `60-moonlight-live-pair-status-validation.md`
 
 ## Product Summary
 
@@ -40,6 +41,7 @@ RelayInnerDisplayScript turns a Proxmox host with an attached monitor into a sin
 - Spec 50 now implements the kiosk compositor-selection contract and runtime diagnostics.
 - Spec 51 now implements the managed sway runtime path for Moonlight.
 - Spec 52 remains the follow-up for the Moonlight-on-sway support matrix and operator contract.
+- Spec 60 now defines the live `PairStatus` validation contract so the relay no longer treats persisted Moonlight `srvcert` data as proof of pairing.
 
 ## Shared Defaults
 
@@ -69,6 +71,7 @@ RelayInnerDisplayScript turns a Proxmox host with an attached monitor into a sin
 15. Spec 50
 16. Spec 51
 17. Spec 52
+18. Spec 60
 
 ## Expansion Plan
 
@@ -79,6 +82,7 @@ Current implementation waves for the console-backend expansion:
 - Wave 3: Specs 30 through 32 implement the Moonlight client path for Sunshine-backed guests.
 - Wave 4: Spec 40 hardens the Moonlight runtime by decoupling paired `Desktop` launch from daemon-side app-list availability, and Spec 41 adds the next Moonlight config-surface follow-up for client resolution overrides.
 - Wave 5: Specs 50 through 51 now ship the compositor-selection and managed sway runtime contracts; Spec 52 remains for the support-matrix follow-up.
+- Wave 6: Spec 60 hardens Moonlight pair truth by validating live Sunshine `PairStatus` before the relay trusts persisted workspace host data.
 
 Parallelization rule:
 
@@ -89,6 +93,7 @@ Parallelization rule:
 - Do not start Spec 40 until Specs 31 and 32 have shipped the initial pair-state and app-validation contracts; Spec 40 narrows those contracts based on operational evidence.
 - Do not start Spec 41 until Spec 40 has captured the current Moonlight runtime contract; Spec 41 extends only the Moonlight config and launch surface without changing the pairing or app-validation state machine.
 - Do not start Wave 5 until Spec 41 has captured the intended Moonlight client-resolution contract; Spec 50 turns compositor choice into explicit configuration, Spec 51 defines the managed sway runtime, and Spec 52 updates the support matrix and operations guidance.
+- Do not start Spec 60 until Specs 31 and 40 have captured the current Moonlight pairing contract; Spec 60 narrows pair truth to live Sunshine `PairStatus` while keeping the managed workspace as credential and pinned-host bootstrap state.
 
 ```mermaid
 flowchart LR
@@ -118,6 +123,10 @@ flowchart LR
         S52["Spec 52\nMoonlight on Sway Support Matrix and Ops"]
     end
 
+    subgraph Wave_6["Wave 6"]
+        S60["Spec 60\nMoonlight Live Pair-Status Validation"]
+    end
+
     S20 --> S21
     S20 --> S22
     S20 --> S30
@@ -129,4 +138,5 @@ flowchart LR
     S41 --> S50
     S50 --> S51
     S51 --> S52
+    S40 --> S60
 ```

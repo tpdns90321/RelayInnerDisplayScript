@@ -4,15 +4,15 @@
 
 Specs 31 and 32 together define Moonlight pairing, app validation, and stream launch, but the first integrated implementation exposed a contract gap:
 
-- the relay already had a durable paired-host signal in the managed Moonlight workspace
+- the relay already had durable Moonlight credentials and pinned-host state in the managed workspace
 - the runtime still treated daemon-side `moonlight list --csv` success as a mandatory precondition for every stream launch
-- in real deployments, `moonlight list --csv` can hang or time out even when the workspace clearly shows a paired host and the kiosk-side `moonlight stream Desktop` path is otherwise viable
+- in real deployments, `moonlight list --csv` can hang or time out even when live pairing is still valid and the kiosk-side `moonlight stream Desktop` path is otherwise viable
 
 That mismatch turns a recoverable helper-path failure into a full appliance `degraded` state, even for the default `Desktop` stream that does not need a dynamic Sunshine app-catalog lookup.
 
 The relay therefore needs a narrower, more realistic runtime contract:
 
-- pairing state must come from the managed workspace
+- pairing truth must come from live authenticated Sunshine `serverinfo` `PairStatus`
 - `Desktop` must be treated as a paired stream surface, not as an app-catalog dependency
 - non-`Desktop` apps should keep live app-list validation
 - degraded app-validation failures must not erase otherwise valid pair state
@@ -61,8 +61,8 @@ quit_app_after_session = false
 
 Runtime contract changes:
 
-- Pair completion is confirmed from the managed Moonlight workspace, not from `moonlight list`.
-- If `app = "Desktop"` and the workspace already shows the configured host as paired, the daemon skips daemon-side `moonlight list --csv` before launch.
+- Pair completion is confirmed from live authenticated Sunshine `serverinfo` `PairStatus`, not from `moonlight list` and not from persisted `srvcert` alone.
+- If `app = "Desktop"` and the live pair probe already confirms the configured host as paired, the daemon skips daemon-side `moonlight list --csv` before launch.
 - If `app != "Desktop"`, the daemon still runs `moonlight list <host-authority> --csv` and requires a case-insensitive exact app-name match.
 - A non-`Desktop` app-list timeout or mismatch may still enter `degraded`, but it must not reset `moonlight_pair_state` from `paired` to `unknown`.
 
@@ -77,7 +77,7 @@ Daemon launch contract:
 
 State semantics updated by this spec:
 
-- `moonlight_pair_state = "paired"` means the managed workspace contains a matching paired-host record.
+- `moonlight_pair_state = "paired"` means the last live pair probe for the configured host confirmed `PairStatus = 1`.
 - `moonlight_pair_state` is cleared only when pairing truly becomes invalid for runtime purposes, such as host unreachable or VM stopped, not when a later app-list helper fails.
 
 ## Data model / Persistence
@@ -89,9 +89,11 @@ Persistent data remains unchanged:
 
 Persistent workspace rules clarified:
 
-- Pair status is derived from Moonlight-managed host records under `state_dir`.
+- The managed workspace keeps Moonlight client identity and pinned-host certificate material under `state_dir`.
+- Pair status is derived from live Sunshine `serverinfo` responses bootstrapped by that workspace material.
 - The relay does not persist its own independent pair-state marker.
 - The relay does not persist a cached Sunshine app catalog.
+- A persisted `srvcert` host record alone is never sufficient to mark the host paired.
 
 Runtime-only data remains:
 
@@ -100,7 +102,7 @@ Runtime-only data remains:
 
 Runtime persistence rules added by this spec:
 
-- `moonlight_pair_state` remains `paired` across app-validation degradation when the workspace still proves pairing.
+- `moonlight_pair_state` remains `paired` across app-validation degradation when the last live pair probe still confirms pairing.
 - `moonlight_pair_pin` is still cleared when pairing succeeds, when the host becomes unreachable, or when the VM stops.
 
 ## Security model (Permission/Isolation/Audit)
@@ -117,15 +119,15 @@ Isolation:
 
 Audit:
 
-- Log when the daemon skips app-list validation for a paired `Desktop` stream.
+- Log when the daemon skips app-list validation for a live-paired `Desktop` stream.
 - Log successful live validation for non-`Desktop` apps.
 - Keep degraded reasons concise and backend-tagged for non-`Desktop` list timeouts or app mismatches.
 - Do not log PINs in journald by default.
 
 ## Acceptance criteria (Testable, Verifiable)
 
-- With a paired workspace and `app = "Desktop"`, the relay launches Moonlight even if daemon-side `moonlight list --csv` would otherwise time out.
-- With a paired workspace and a non-`Desktop` app, the relay still validates against the live app list before launch.
+- With a live-paired host and `app = "Desktop"`, the relay launches Moonlight even if daemon-side `moonlight list --csv` would otherwise time out.
+- With a live-paired host and a non-`Desktop` app, the relay still validates against the live app list before launch.
 - If that non-`Desktop` app validation fails or times out, the relay enters `degraded` with a clear reason and keeps `moonlight_pair_state = "paired"`.
 - If the host becomes unreachable during a pending pairing episode, the relay still clears the PIN and returns to reconnect flow.
 - Existing SPICE, VNC, Looking Glass, and Moonlight pairing UI behavior remain unchanged.
@@ -134,11 +136,11 @@ Audit:
 
 Daemon behavior:
 
-- paired workspace plus `Desktop` app with no daemon-side `list` call
-- paired workspace plus non-`Desktop` app with successful live list validation
-- paired workspace plus non-`Desktop` app mismatch
-- paired workspace plus non-`Desktop` list timeout
-- paired workspace plus unexpected Moonlight exit and reconnect
+- live-paired `Desktop` app with no daemon-side `list` call
+- live-paired non-`Desktop` app with successful live list validation
+- live-paired non-`Desktop` app mismatch
+- live-paired non-`Desktop` list timeout
+- live-paired host plus unexpected Moonlight exit and reconnect
 
 State behavior:
 
@@ -173,7 +175,7 @@ Operational compatibility notes:
 
 Documentation rules:
 
-- README and ops docs must describe pair state as workspace-derived
+- README and ops docs must describe pair state as live `PairStatus`-confirmed, with the workspace used only for Moonlight credentials and pinned-host bootstrap data
 - README and ops docs must explicitly call out the `Desktop` fast-path
 - docs must preserve the warning that `quit_app_after_session = true` is invalid for `Desktop`
 

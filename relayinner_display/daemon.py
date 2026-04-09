@@ -3,6 +3,7 @@ from __future__ import annotations
 from argparse import ArgumentParser
 import csv
 from datetime import datetime, timedelta, timezone
+import http.client
 from pathlib import Path
 import random
 import re
@@ -13,9 +14,14 @@ import logging
 import os
 import pwd
 import socket
+import ssl
 import stat
 import subprocess
+import tempfile
 import time
+import urllib.parse
+import uuid
+import xml.etree.ElementTree as ET
 
 from .config import (
     AppConfig,
@@ -55,6 +61,8 @@ REQUIRED_DAEMON_BINARIES: tuple[str, ...] = ()
 MIN_MOONLIGHT_VERSION = (6, 0, 0)
 MOONLIGHT_PAIR_TIMEOUT = timedelta(seconds=300)
 MOONLIGHT_HOST_PROBE_TIMEOUT_S = 1.0
+DEFAULT_MOONLIGHT_HTTPS_PORT = 47984
+MOONLIGHT_SERVERINFO_UNIQUEID = "0123456789ABCDEF"
 VERSION_RE = re.compile(r"(\d+)\.(\d+)\.(\d+)")
 MOONLIGHT_SETTINGS_KEY_RE = re.compile(r"(?P<index>\d+)[/\\\\](?P<field>[A-Za-z0-9_]+)")
 MOONLIGHT_SETTINGS_SECTIONS = ("hostsbackup", "hosts")
@@ -73,6 +81,15 @@ class RuntimeValidationError(RuntimeError):
 CommandRunner = Callable[..., subprocess.CompletedProcess[str]]
 TCPConnectProbe = Callable[[str, int, float], None]
 PinGenerator = Callable[[], str]
+MoonlightPairStateProbe = Callable[[str, bool], str]
+
+
+class MoonlightServerInfoConnectionError(RuntimeValidationError):
+    """Raised when the daemon cannot reach Sunshine for a serverinfo probe."""
+
+
+class MoonlightServerInfoAuthError(RuntimeValidationError):
+    """Raised when Sunshine rejects the current Moonlight pairing identity."""
 
 
 def utcnow() -> datetime:
@@ -219,6 +236,7 @@ class DisplayDaemon:
         command_runner: CommandRunner = subprocess.run,
         tcp_connect_probe: TCPConnectProbe | None = None,
         pin_generator: PinGenerator | None = None,
+        moonlight_pair_state_probe: MoonlightPairStateProbe | None = None,
         startup_error: str | None = None,
     ) -> None:
         self.config = config
@@ -273,6 +291,9 @@ class DisplayDaemon:
         self.command_runner = command_runner
         self.tcp_connect_probe = tcp_connect_probe or self._probe_tcp_connectivity
         self.pin_generator = pin_generator or generate_moonlight_pin
+        self.moonlight_pair_state_probe = (
+            moonlight_pair_state_probe or self._probe_moonlight_pair_state
+        )
         self.validate_runtime_dependencies = dependency_finder is not None or isinstance(
             proxmox,
             ProxmoxClient,
@@ -862,11 +883,25 @@ class DisplayDaemon:
             return True, [{"type": "show_waiting", "reason": "reconnecting"}]
 
         self.next_reconnect_at = None
-        if self._moonlight_workspace_host_is_paired():
+        configured_host_pair_state = self.moonlight_pair_state_probe(
+            moonlight.host_authority,
+            False,
+        )
+        if configured_host_pair_state == "paired":
             self._mark_moonlight_as_paired()
             return False, []
+        if configured_host_pair_state == "unreachable":
+            self._clear_moonlight_pair_state()
+            self.state.last_error = (
+                "Moonlight pair-status probe could not reach host: "
+                f"{moonlight.host_authority}"
+            )
+            self._schedule_reconnect(now)
+            self._transition(SessionState.RECONNECTING_CONSOLE)
+            self.console_logger.warning("%s", self.state.last_error)
+            return True, [{"type": "show_waiting", "reason": "reconnecting"}]
         if (
-            self._moonlight_workspace_contains_paired_host()
+            self._moonlight_workspace_contains_pinned_host_record()
             and self._moonlight_host_reuses_existing_pairing()
         ):
             self._normalize_moonlight_workspace_host()
@@ -953,22 +988,60 @@ class DisplayDaemon:
             return False
         return True
 
-    def _moonlight_workspace_host_is_paired(self) -> bool:
+    def _probe_moonlight_pair_state(
+        self,
+        host_authority: str,
+        allow_any_paired_host: bool,
+    ) -> str:
         moonlight = self.config.console.moonlight
         if moonlight is None:
             raise AssertionError("Moonlight backend selected without console.moonlight config")
 
-        configured_host = self._normalize_moonlight_host_value(moonlight.host)
-        for record in self._moonlight_workspace_host_records():
-            if not self._moonlight_workspace_record_matches_host(
-                record,
-                configured_host,
-                moonlight.base_port,
-            ):
-                continue
-            if record.get("srvcert", "").strip():
-                return True
-        return False
+        client_credentials = self._moonlight_workspace_client_credentials()
+        server_certificate = self._moonlight_workspace_server_certificate(
+            host_authority,
+            allow_any_paired_host=allow_any_paired_host,
+        )
+        if client_credentials is None or server_certificate is None:
+            return "unpaired"
+
+        try:
+            http_fields = self._read_moonlight_serverinfo_fields(
+                host=moonlight.host,
+                port=moonlight.base_port,
+                host_authority=host_authority,
+            )
+            https_port = self._moonlight_https_port_from_serverinfo(http_fields)
+            https_fields = self._read_moonlight_serverinfo_fields(
+                host=moonlight.host,
+                port=https_port,
+                host_authority=host_authority,
+                server_certificate=server_certificate,
+                client_credentials=client_credentials,
+            )
+        except MoonlightServerInfoConnectionError as exc:
+            self.console_logger.info(
+                "Moonlight live pair probe could not reach host=%s: %s",
+                host_authority,
+                exc,
+            )
+            return "unreachable"
+        except MoonlightServerInfoAuthError as exc:
+            self.console_logger.info(
+                "Moonlight live pair probe did not confirm pairing for host=%s: %s",
+                host_authority,
+                exc,
+            )
+            return "unpaired"
+        except RuntimeValidationError as exc:
+            self.console_logger.info(
+                "Moonlight live pair probe did not confirm pairing for host=%s: %s",
+                host_authority,
+                exc,
+            )
+            return "unpaired"
+
+        return "paired" if https_fields.get("PairStatus", "").strip() == "1" else "unpaired"
 
     def _moonlight_workspace_host_records(self) -> list[dict[str, str]]:
         moonlight = self.config.console.moonlight
@@ -1014,8 +1087,133 @@ class DisplayDaemon:
                 return [section_records[index] for index in sorted(section_records)]
         return []
 
-    def _moonlight_workspace_contains_paired_host(self) -> bool:
+    def _moonlight_workspace_contains_pinned_host_record(self) -> bool:
         return any(record.get("srvcert", "").strip() for record in self._moonlight_workspace_host_records())
+
+    def _moonlight_workspace_root_settings(self) -> dict[str, str]:
+        moonlight = self.config.console.moonlight
+        if moonlight is None:
+            raise AssertionError("Moonlight backend selected without console.moonlight config")
+
+        settings: dict[str, str] = {}
+        for settings_path in sorted(moonlight.state_dir.rglob("*.ini")):
+            if not settings_path.is_file():
+                continue
+            try:
+                lines = settings_path.read_text(encoding="utf-8", errors="replace").splitlines()
+            except OSError:
+                continue
+
+            active_section: str | None = None
+            for raw_line in lines:
+                line = raw_line.strip()
+                if not line or line.startswith(("#", ";")):
+                    continue
+                if line.startswith("[") and line.endswith("]"):
+                    active_section = line[1:-1].strip().casefold()
+                    continue
+                if active_section is not None:
+                    continue
+
+                key, separator, value = line.partition("=")
+                if not separator:
+                    continue
+                settings[key.strip().casefold()] = value.strip()
+
+        return settings
+
+    def _moonlight_workspace_client_credentials(self) -> tuple[str, str] | None:
+        settings = self._moonlight_workspace_root_settings()
+        certificate = self._decode_moonlight_qsettings_bytearray(settings.get("certificate", ""))
+        private_key = self._decode_moonlight_qsettings_bytearray(settings.get("key", ""))
+        if not certificate or not private_key:
+            return None
+        return certificate, private_key
+
+    def _moonlight_workspace_server_certificate(
+        self,
+        host_authority: str,
+        *,
+        allow_any_paired_host: bool,
+    ) -> str | None:
+        moonlight = self.config.console.moonlight
+        if moonlight is None:
+            raise AssertionError("Moonlight backend selected without console.moonlight config")
+
+        configured_host = self._normalize_moonlight_host_value(host_authority)
+        fallback_certificate: str | None = None
+        for record in self._moonlight_workspace_host_records():
+            raw_certificate = record.get("srvcert", "").strip()
+            if not raw_certificate:
+                continue
+            decoded_certificate = self._decode_moonlight_qsettings_bytearray(raw_certificate)
+            if not decoded_certificate:
+                continue
+            if fallback_certificate is None:
+                fallback_certificate = decoded_certificate
+            if self._moonlight_workspace_record_matches_host(
+                record,
+                configured_host,
+                moonlight.base_port,
+            ):
+                return decoded_certificate
+
+        if allow_any_paired_host:
+            return fallback_certificate
+        return None
+
+    def _decode_moonlight_qsettings_bytearray(self, value: str) -> str | None:
+        encoded = value.strip()
+        if not encoded:
+            return None
+        if encoded.startswith("@ByteArray(") and encoded.endswith(")"):
+            encoded = encoded[len("@ByteArray(") : -1]
+
+        decoded: list[str] = []
+        index = 0
+        while index < len(encoded):
+            character = encoded[index]
+            if character != "\\":
+                decoded.append(character)
+                index += 1
+                continue
+
+            index += 1
+            if index >= len(encoded):
+                decoded.append("\\")
+                break
+
+            escape = encoded[index]
+            if escape == "n":
+                decoded.append("\n")
+                index += 1
+                continue
+            if escape == "r":
+                decoded.append("\r")
+                index += 1
+                continue
+            if escape == "t":
+                decoded.append("\t")
+                index += 1
+                continue
+            if escape == "\\":
+                decoded.append("\\")
+                index += 1
+                continue
+            if (
+                escape == "x"
+                and index + 2 < len(encoded)
+                and all(character in "0123456789abcdefABCDEF" for character in encoded[index + 1 : index + 3])
+            ):
+                decoded.append(chr(int(encoded[index + 1 : index + 3], 16)))
+                index += 3
+                continue
+
+            decoded.append(escape)
+            index += 1
+
+        rendered = "".join(decoded).strip()
+        return rendered or None
 
     def _normalize_moonlight_workspace_host(self) -> None:
         moonlight = self.config.console.moonlight
@@ -1229,16 +1427,176 @@ class DisplayDaemon:
         if moonlight is None:
             raise AssertionError("Moonlight backend selected without console.moonlight config")
 
+        return self.moonlight_pair_state_probe(moonlight.host_authority, True) == "paired"
+
+    def _read_moonlight_serverinfo_fields(
+        self,
+        *,
+        host: str,
+        port: int,
+        host_authority: str,
+        server_certificate: str | None = None,
+        client_credentials: tuple[str, str] | None = None,
+    ) -> dict[str, str]:
+        response = self._request_moonlight_serverinfo(
+            host=host,
+            port=port,
+            host_authority=host_authority,
+            server_certificate=server_certificate,
+            client_credentials=client_credentials,
+        )
+        return self._parse_moonlight_serverinfo_fields(
+            response,
+            host_authority=host_authority,
+            port=port,
+            scheme="https" if server_certificate is not None else "http",
+        )
+
+    def _request_moonlight_serverinfo(
+        self,
+        *,
+        host: str,
+        port: int,
+        host_authority: str,
+        server_certificate: str | None = None,
+        client_credentials: tuple[str, str] | None = None,
+    ) -> str:
+        query = urllib.parse.urlencode(
+            {
+                "uniqueid": MOONLIGHT_SERVERINFO_UNIQUEID,
+                "uuid": uuid.uuid4().hex,
+            }
+        )
+        path = f"/serverinfo?{query}"
+        timeout_s = self.config.policy.command_timeout_s
+        connection: http.client.HTTPConnection | http.client.HTTPSConnection | None = None
+        temporary_paths: list[Path] = []
+
         try:
-            self._moonlight_list_apps()
-        except RuntimeValidationError as exc:
-            self.console_logger.info(
-                "Moonlight live probe did not confirm existing pairing for host=%s: %s",
-                moonlight.host_authority,
-                exc,
+            if server_certificate is None:
+                connection = http.client.HTTPConnection(host, port, timeout=timeout_s)
+            else:
+                if client_credentials is None:
+                    raise RuntimeValidationError(
+                        f"Moonlight client credentials are missing for host={host_authority}"
+                    )
+                client_certificate, client_key = client_credentials
+                context = ssl.create_default_context(cadata=server_certificate)
+                context.check_hostname = False
+                cert_file = tempfile.NamedTemporaryFile(
+                    "w",
+                    encoding="utf-8",
+                    delete=False,
+                )
+                key_file = tempfile.NamedTemporaryFile(
+                    "w",
+                    encoding="utf-8",
+                    delete=False,
+                )
+                cert_path = Path(cert_file.name)
+                key_path = Path(key_file.name)
+                temporary_paths.extend((cert_path, key_path))
+                try:
+                    cert_file.write(client_certificate)
+                    key_file.write(client_key)
+                finally:
+                    cert_file.close()
+                    key_file.close()
+                context.load_cert_chain(certfile=str(cert_path), keyfile=str(key_path))
+                connection = http.client.HTTPSConnection(
+                    host,
+                    port,
+                    timeout=timeout_s,
+                    context=context,
+                )
+
+            connection.request("GET", path)
+            response = connection.getresponse()
+            payload = response.read().decode("utf-8", errors="replace")
+        except ssl.SSLError as exc:
+            raise RuntimeValidationError(
+                "Moonlight serverinfo HTTPS probe failed for "
+                f"{host_authority}:{port}: {exc}"
+            ) from exc
+        except (OSError, TimeoutError, http.client.HTTPException) as exc:
+            raise MoonlightServerInfoConnectionError(
+                "Moonlight serverinfo probe failed for "
+                f"{host_authority}:{port}: {exc}"
+            ) from exc
+        finally:
+            if connection is not None:
+                connection.close()
+            for temporary_path in temporary_paths:
+                try:
+                    temporary_path.unlink()
+                except OSError:
+                    pass
+
+        if not payload.strip():
+            raise RuntimeValidationError(
+                f"Moonlight serverinfo probe returned an empty response for {host_authority}:{port}"
             )
-            return False
-        return True
+        return payload
+
+    def _parse_moonlight_serverinfo_fields(
+        self,
+        payload: str,
+        *,
+        host_authority: str,
+        port: int,
+        scheme: str,
+    ) -> dict[str, str]:
+        try:
+            root = ET.fromstring(payload)
+        except ET.ParseError as exc:
+            raise RuntimeValidationError(
+                "Moonlight serverinfo probe returned invalid XML for "
+                f"{scheme}://{host_authority}:{port}: {exc}"
+            ) from exc
+
+        if root.tag != "root":
+            raise RuntimeValidationError(
+                "Moonlight serverinfo probe returned an unexpected XML root for "
+                f"{scheme}://{host_authority}:{port}: {root.tag}"
+            )
+
+        status_code_text = root.attrib.get("status_code", "")
+        try:
+            status_code = int(status_code_text)
+        except ValueError as exc:
+            raise RuntimeValidationError(
+                "Moonlight serverinfo probe returned a non-numeric status for "
+                f"{scheme}://{host_authority}:{port}: {status_code_text!r}"
+            ) from exc
+
+        if status_code == 401:
+            raise MoonlightServerInfoAuthError(
+                f"Sunshine reported the Moonlight client as unpaired for {host_authority}"
+            )
+        if status_code != 200:
+            status_message = root.attrib.get("status_message", "")
+            raise RuntimeValidationError(
+                "Moonlight serverinfo probe failed for "
+                f"{scheme}://{host_authority}:{port}: status_code={status_code} "
+                f"status_message={status_message!r}"
+            )
+
+        return {
+            child.tag: (child.text or "").strip()
+            for child in root
+        }
+
+    def _moonlight_https_port_from_serverinfo(self, fields: dict[str, str]) -> int:
+        https_port_text = fields.get("HttpsPort", "").strip()
+        if not https_port_text:
+            return DEFAULT_MOONLIGHT_HTTPS_PORT
+        try:
+            https_port = int(https_port_text)
+        except ValueError as exc:
+            raise RuntimeValidationError(
+                f"Moonlight serverinfo returned an invalid HttpsPort: {https_port_text!r}"
+            ) from exc
+        return https_port or DEFAULT_MOONLIGHT_HTTPS_PORT
 
     def _moonlight_list_apps(self) -> list[str]:
         moonlight = self.config.console.moonlight
@@ -1442,7 +1800,7 @@ class DisplayDaemon:
             if self._moonlight_app_uses_desktop_stream():
                 self.console_logger.info(
                     "Skipping Moonlight app-list validation for Desktop stream on host=%s; "
-                    "paired workspace state already exists",
+                    "live pair state is already confirmed",
                     moonlight.host_authority,
                 )
             else:

@@ -169,14 +169,25 @@ def write_moonlight_host_settings(
     port: int = 47989,
     paired: bool = True,
     section: str = "hosts",
+    client_certificate: str | None = None,
+    client_key: str | None = None,
 ) -> Path:
-    lines = [
-        f"[{section}]",
-        "size=1",
-        f"1\\hostname={host}",
-        f"1\\manualaddress={host}",
-        f"1\\manualport={port}",
-    ]
+    lines: list[str] = []
+    if client_certificate is not None:
+        lines.append(f"certificate=@ByteArray({client_certificate})")
+    if client_key is not None:
+        lines.append(f"key=@ByteArray({client_key})")
+    if lines:
+        lines.append("")
+    lines.extend(
+        [
+            f"[{section}]",
+            "size=1",
+            f"1\\hostname={host}",
+            f"1\\manualaddress={host}",
+            f"1\\manualport={port}",
+        ]
+    )
     if paired:
         lines.append("1\\srvcert=@ByteArray(dummy-cert)")
 
@@ -529,6 +540,7 @@ class DisplayDaemonTests(unittest.TestCase):
                 dependency_finder=lambda name: f"/usr/bin/{Path(name).name}",
                 command_runner=fake_command_runner,
                 tcp_connect_probe=lambda host, port, timeout_s: None,
+                moonlight_pair_state_probe=lambda host_authority, allow_any_paired_host: "paired",
             )
             start_time = datetime(2026, 4, 7, 0, 0, tzinfo=timezone.utc)
 
@@ -612,6 +624,7 @@ class DisplayDaemonTests(unittest.TestCase):
                 dependency_finder=lambda name: f"/usr/bin/{Path(name).name}",
                 command_runner=fake_command_runner,
                 tcp_connect_probe=lambda host, port, timeout_s: None,
+                moonlight_pair_state_probe=lambda host_authority, allow_any_paired_host: "paired",
             )
             start_time = datetime(2026, 4, 4, 0, 0, tzinfo=timezone.utc)
 
@@ -692,6 +705,7 @@ class DisplayDaemonTests(unittest.TestCase):
                 dependency_finder=lambda name: f"/usr/bin/{Path(name).name}",
                 command_runner=fake_command_runner,
                 tcp_connect_probe=lambda host, port, timeout_s: None,
+                moonlight_pair_state_probe=lambda host_authority, allow_any_paired_host: "paired",
             )
             start_time = datetime(2026, 4, 8, 0, 0, tzinfo=timezone.utc)
 
@@ -753,6 +767,7 @@ class DisplayDaemonTests(unittest.TestCase):
                 dependency_finder=lambda name: f"/usr/bin/{Path(name).name}",
                 command_runner=fake_command_runner,
                 tcp_connect_probe=lambda host, port, timeout_s: None,
+                moonlight_pair_state_probe=lambda host_authority, allow_any_paired_host: "paired",
             )
             start_time = datetime(2026, 4, 7, 0, 0, tzinfo=timezone.utc)
 
@@ -835,6 +850,7 @@ class DisplayDaemonTests(unittest.TestCase):
                 command_runner=fake_command_runner,
                 tcp_connect_probe=fake_probe,
                 pin_generator=lambda: "1234",
+                moonlight_pair_state_probe=lambda host_authority, allow_any_paired_host: "unpaired",
             )
             start_time = datetime(2026, 4, 7, 0, 0, tzinfo=timezone.utc)
 
@@ -872,6 +888,110 @@ class DisplayDaemonTests(unittest.TestCase):
         self.assertEqual(payload["moonlight_host"], "192.168.50.20")
         self.assertEqual(payload["moonlight_base_port"], 47989)
 
+    def test_moonlight_live_pair_probe_requires_live_pair_status(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            state_dir = Path(temp_dir) / "moonlight-state"
+            config = build_config(
+                Path(temp_dir),
+                backend="moonlight",
+                moonlight_state_dir=state_dir,
+            )
+            daemon = DisplayDaemon(
+                config=config,
+                proxmox=FakeProxmoxClient(["running"]),
+                dependency_finder=lambda name: f"/usr/bin/{Path(name).name}",
+                command_runner=lambda command, cwd=None, text=True, capture_output=True, check=False, **_: (
+                    SimpleNamespace(returncode=0, stdout="Moonlight 6.1.0\n", stderr="")
+                ),
+                tcp_connect_probe=lambda host, port, timeout_s: None,
+            )
+            daemon.prepare_runtime()
+            write_moonlight_host_settings(
+                state_dir,
+                "192.168.50.20",
+                client_certificate="client\\ncert",
+                client_key="client\\nkey",
+            )
+            requests: list[tuple[int, bool, tuple[str, str] | None]] = []
+
+            def fake_request(
+                *,
+                host: str,
+                port: int,
+                host_authority: str,
+                server_certificate: str | None = None,
+                client_credentials: tuple[str, str] | None = None,
+            ) -> str:
+                requests.append((port, server_certificate is not None, client_credentials))
+                self.assertEqual(host, "192.168.50.20")
+                self.assertEqual(host_authority, "192.168.50.20")
+                if server_certificate is None:
+                    return (
+                        '<root status_code="200" status_message="OK">'
+                        "<HttpsPort>47984</HttpsPort>"
+                        "<PairStatus>0</PairStatus>"
+                        "</root>"
+                    )
+                return (
+                    '<root status_code="200" status_message="OK">'
+                    "<PairStatus>0</PairStatus>"
+                    "</root>"
+                )
+
+            daemon._request_moonlight_serverinfo = fake_request  # type: ignore[method-assign]
+            result = daemon._probe_moonlight_pair_state("192.168.50.20", False)
+
+        self.assertEqual(result, "unpaired")
+        self.assertEqual(
+            requests,
+            [
+                (47989, False, None),
+                (47984, True, ("client\ncert", "client\nkey")),
+            ],
+        )
+
+    def test_moonlight_workspace_certificate_alone_does_not_skip_pairing(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            state_dir = Path(temp_dir) / "moonlight-state"
+            config = build_config(
+                Path(temp_dir),
+                backend="moonlight",
+                moonlight_state_dir=state_dir,
+            )
+            daemon = DisplayDaemon(
+                config=config,
+                proxmox=FakeProxmoxClient(["running"]),
+                dependency_finder=lambda name: f"/usr/bin/{Path(name).name}",
+                command_runner=lambda command, cwd=None, text=True, capture_output=True, check=False, **_: (
+                    SimpleNamespace(returncode=0, stdout="Moonlight 6.1.0\n", stderr="")
+                ),
+                tcp_connect_probe=lambda host, port, timeout_s: None,
+                pin_generator=lambda: "5678",
+                moonlight_pair_state_probe=lambda host_authority, allow_any_paired_host: "unpaired",
+            )
+            start_time = datetime(2026, 4, 9, 0, 0, tzinfo=timezone.utc)
+
+            daemon.prepare_runtime()
+            write_moonlight_host_settings(state_dir, "192.168.50.20")
+            daemon.start(now=start_time)
+            daemon.handle_session_message({"type": "session_ready"}, now=start_time)
+            actions = daemon.tick(now=start_time)
+
+        self.assertEqual(
+            actions,
+            [
+                {
+                    "type": "connect_console",
+                    "backend": "moonlight",
+                    "launcher": "moonlight",
+                    "cwd": str(state_dir),
+                    "argv": ["moonlight", "pair", "192.168.50.20", "--pin", "5678"],
+                }
+            ],
+        )
+        self.assertEqual(daemon.state.session_state, SessionState.WAITING_FOR_PAIRING)
+        self.assertEqual(daemon.state.moonlight_pair_state, MoonlightPairState.PENDING_PIN_APPROVAL)
+
     def test_moonlight_pairing_completion_launches_console_while_pairing_ui_is_running(self) -> None:
         with TemporaryDirectory() as temp_dir:
             state_dir = Path(temp_dir) / "moonlight-state"
@@ -880,8 +1000,8 @@ class DisplayDaemonTests(unittest.TestCase):
                 backend="moonlight",
                 moonlight_state_dir=state_dir,
             )
-            list_results = iter([0])
             moonlight_commands: list[tuple[list[str], str | None]] = []
+            pair_states = iter(["unpaired", "paired"])
 
             def fake_command_runner(
                 command: list[str],
@@ -894,13 +1014,6 @@ class DisplayDaemonTests(unittest.TestCase):
                 moonlight_commands.append((command, cwd))
                 if command == ["/usr/bin/moonlight", "--version"]:
                     return SimpleNamespace(returncode=0, stdout="Moonlight 6.1.0\n", stderr="")
-                if command == ["/usr/bin/moonlight", "list", "192.168.50.20", "--csv"]:
-                    result = next(list_results)
-                    return SimpleNamespace(
-                        returncode=result,
-                        stdout=moonlight_app_list_csv("Desktop") if result == 0 else "",
-                        stderr="",
-                    )
                 raise AssertionError(f"Unexpected Moonlight command: {command}")
 
             daemon = DisplayDaemon(
@@ -910,6 +1023,7 @@ class DisplayDaemonTests(unittest.TestCase):
                 command_runner=fake_command_runner,
                 tcp_connect_probe=lambda host, port, timeout_s: None,
                 pin_generator=lambda: "1234",
+                moonlight_pair_state_probe=lambda host_authority, allow_any_paired_host: next(pair_states),
             )
             start_time = datetime(2026, 4, 7, 0, 0, tzinfo=timezone.utc)
 
@@ -1124,6 +1238,7 @@ class DisplayDaemonTests(unittest.TestCase):
                 dependency_finder=lambda name: f"/usr/bin/{Path(name).name}",
                 command_runner=fake_command_runner,
                 tcp_connect_probe=lambda host, port, timeout_s: None,
+                moonlight_pair_state_probe=lambda host_authority, allow_any_paired_host: "paired",
             )
             start_time = datetime(2026, 4, 7, 0, 0, tzinfo=timezone.utc)
 
@@ -1176,6 +1291,7 @@ class DisplayDaemonTests(unittest.TestCase):
                     )
                 ),
                 tcp_connect_probe=lambda host, port, timeout_s: None,
+                moonlight_pair_state_probe=lambda host_authority, allow_any_paired_host: "paired",
             )
             start_time = datetime(2026, 4, 7, 0, 0, tzinfo=timezone.utc)
 
@@ -1197,7 +1313,7 @@ class DisplayDaemonTests(unittest.TestCase):
             "Configured Moonlight app is not available on 192.168.50.20: Steam Big Picture",
         )
 
-    def test_moonlight_desktop_stream_skips_list_timeout_when_workspace_is_paired(self) -> None:
+    def test_moonlight_desktop_stream_skips_list_timeout_when_live_pair_is_confirmed(self) -> None:
         with TemporaryDirectory() as temp_dir:
             state_dir = Path(temp_dir) / "moonlight-state"
             config = build_config(
@@ -1225,6 +1341,7 @@ class DisplayDaemonTests(unittest.TestCase):
                 dependency_finder=lambda name: f"/usr/bin/{Path(name).name}",
                 command_runner=fake_command_runner,
                 tcp_connect_probe=lambda host, port, timeout_s: None,
+                moonlight_pair_state_probe=lambda host_authority, allow_any_paired_host: "paired",
             )
             start_time = datetime(2026, 4, 7, 0, 0, tzinfo=timezone.utc)
 
@@ -1294,6 +1411,11 @@ class DisplayDaemonTests(unittest.TestCase):
                 dependency_finder=lambda name: f"/usr/bin/{Path(name).name}",
                 command_runner=fake_command_runner,
                 tcp_connect_probe=lambda host, port, timeout_s: None,
+                moonlight_pair_state_probe=(
+                    lambda host_authority, allow_any_paired_host: (
+                        "paired" if allow_any_paired_host else "unpaired"
+                    )
+                ),
             )
             start_time = datetime(2026, 4, 9, 0, 0, tzinfo=timezone.utc)
 
@@ -1334,7 +1456,6 @@ class DisplayDaemonTests(unittest.TestCase):
             moonlight_commands,
             [
                 (["/usr/bin/moonlight", "--version"], None),
-                (["/usr/bin/moonlight", "list", "192.168.50.21", "--csv"], str(state_dir)),
             ],
         )
 
@@ -1372,6 +1493,7 @@ class DisplayDaemonTests(unittest.TestCase):
                 dependency_finder=lambda name: f"/usr/bin/{Path(name).name}",
                 command_runner=fake_command_runner,
                 tcp_connect_probe=lambda host, port, timeout_s: None,
+                moonlight_pair_state_probe=lambda host_authority, allow_any_paired_host: "paired",
             )
             start_time = datetime(2026, 4, 7, 0, 0, tzinfo=timezone.utc)
 
