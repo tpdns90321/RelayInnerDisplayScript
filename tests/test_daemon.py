@@ -1298,10 +1298,11 @@ class DisplayDaemonTests(unittest.TestCase):
             start_time = datetime(2026, 4, 9, 0, 0, tzinfo=timezone.utc)
 
             daemon.prepare_runtime()
-            write_moonlight_host_settings(state_dir, "192.168.50.20")
+            settings_path = write_moonlight_host_settings(state_dir, "192.168.50.20")
             daemon.start(now=start_time)
             daemon.handle_session_message({"type": "session_ready"}, now=start_time)
             actions = daemon.tick(now=start_time)
+            settings_contents = settings_path.read_text(encoding="utf-8")
 
         self.assertEqual(
             actions,
@@ -1324,6 +1325,11 @@ class DisplayDaemonTests(unittest.TestCase):
         )
         self.assertEqual(daemon.state.session_state, SessionState.REQUESTING_CONSOLE)
         self.assertEqual(daemon.state.moonlight_pair_state, MoonlightPairState.PAIRED)
+        self.assertIn("1\\hostname=192.168.50.21", settings_contents)
+        self.assertIn("1\\manualaddress=192.168.50.21", settings_contents)
+        self.assertIn("1\\manualport=47989", settings_contents)
+        self.assertNotIn("1\\hostname=192.168.50.20", settings_contents)
+        self.assertNotIn("1\\manualaddress=192.168.50.20", settings_contents)
         self.assertEqual(
             moonlight_commands,
             [

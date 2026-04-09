@@ -869,6 +869,7 @@ class DisplayDaemon:
             self._moonlight_workspace_contains_paired_host()
             and self._moonlight_host_reuses_existing_pairing()
         ):
+            self._normalize_moonlight_workspace_host()
             self.console_logger.info(
                 "Recovered Moonlight paired state for configured host=%s via live probe after workspace host mismatch",
                 moonlight.host_authority,
@@ -1015,6 +1016,168 @@ class DisplayDaemon:
 
     def _moonlight_workspace_contains_paired_host(self) -> bool:
         return any(record.get("srvcert", "").strip() for record in self._moonlight_workspace_host_records())
+
+    def _normalize_moonlight_workspace_host(self) -> None:
+        moonlight = self.config.console.moonlight
+        if moonlight is None:
+            raise AssertionError("Moonlight backend selected without console.moonlight config")
+
+        host_value = moonlight.host.strip()
+        if host_value.startswith("[") and host_value.endswith("]"):
+            host_value = host_value[1:-1]
+
+        updated_paths: list[Path] = []
+        for settings_path in sorted(moonlight.state_dir.rglob("*.ini")):
+            if self._rewrite_moonlight_workspace_settings_file(
+                settings_path,
+                host=host_value,
+                port=moonlight.base_port,
+            ):
+                updated_paths.append(settings_path)
+
+        if updated_paths:
+            joined_paths = ",".join(str(path) for path in updated_paths)
+            self.console_logger.info(
+                "Normalized Moonlight paired host records for configured host=%s in %s",
+                moonlight.host_authority,
+                joined_paths,
+            )
+
+    def _rewrite_moonlight_workspace_settings_file(
+        self,
+        settings_path: Path,
+        *,
+        host: str,
+        port: int,
+    ) -> bool:
+        try:
+            original_lines = settings_path.read_text(
+                encoding="utf-8",
+                errors="replace",
+            ).splitlines()
+        except OSError as exc:
+            self.console_logger.warning(
+                "Failed to read Moonlight settings file for host normalization: %s: %s",
+                settings_path,
+                exc,
+            )
+            return False
+
+        relevant_sections = set(MOONLIGHT_SETTINGS_SECTIONS)
+        section_end_indexes: dict[str, int] = {}
+        records: dict[tuple[str, int], dict[str, object]] = {}
+        active_section: str | None = None
+
+        for index, raw_line in enumerate(original_lines):
+            line = raw_line.strip()
+            if line.startswith("[") and line.endswith("]"):
+                active_section = line[1:-1].strip().casefold()
+                if active_section in relevant_sections:
+                    section_end_indexes.setdefault(active_section, index + 1)
+                continue
+
+            if active_section not in relevant_sections:
+                continue
+
+            section_end_indexes[active_section] = index + 1
+            if not line or line.startswith(("#", ";")):
+                continue
+
+            key, separator, value = line.partition("=")
+            if not separator:
+                continue
+
+            match = MOONLIGHT_SETTINGS_KEY_RE.fullmatch(key.strip())
+            if match is None:
+                continue
+
+            record_index = int(match.group("index"))
+            field = match.group("field").casefold()
+            record = records.setdefault(
+                (active_section, record_index),
+                {"fields": {}, "paired": False},
+            )
+            record_fields = record["fields"]
+            assert isinstance(record_fields, dict)
+            record_fields[field] = index
+            if field == "srvcert" and value.strip():
+                record["paired"] = True
+
+        replacement_lines = list(original_lines)
+        insertions_by_section: dict[str, list[str]] = {}
+        stale_fields = {field for field, _ in MOONLIGHT_HOST_ADDRESS_FIELDS[1:]}
+        stale_fields.update({port_field for _, port_field in MOONLIGHT_HOST_ADDRESS_FIELDS[1:]})
+        updated = False
+
+        for record_key, record in records.items():
+            paired = bool(record["paired"])
+            if not paired:
+                continue
+
+            section, record_index = record_key
+            record_fields = record["fields"]
+            assert isinstance(record_fields, dict)
+
+            desired_values = {
+                "hostname": host,
+                "manualaddress": host,
+                "manualport": str(port),
+            }
+            for field, value in desired_values.items():
+                field_line = record_fields.get(field)
+                rendered = f"{record_index}\\{field}={value}"
+                if isinstance(field_line, int):
+                    if replacement_lines[field_line] != rendered:
+                        replacement_lines[field_line] = rendered
+                        updated = True
+                else:
+                    insertions_by_section.setdefault(section, []).append(rendered)
+                    updated = True
+
+            for field in stale_fields:
+                field_line = record_fields.get(field)
+                if not isinstance(field_line, int):
+                    continue
+                rendered = f"{record_index}\\{field}="
+                if replacement_lines[field_line] != rendered:
+                    replacement_lines[field_line] = rendered
+                    updated = True
+
+        if not updated:
+            return False
+
+        for section, insert_at in sorted(
+            section_end_indexes.items(),
+            key=lambda item: item[1],
+            reverse=True,
+        ):
+            new_lines = insertions_by_section.get(section)
+            if not new_lines:
+                continue
+            replacement_lines[insert_at:insert_at] = new_lines
+
+        try:
+            mode = settings_path.stat().st_mode & 0o777
+        except OSError:
+            mode = None
+
+        try:
+            settings_path.write_text(
+                "\n".join(replacement_lines) + "\n",
+                encoding="utf-8",
+            )
+            if mode is not None:
+                os.chmod(settings_path, mode)
+            chown_if_present(settings_path, SESSION_USER, SESSION_GROUP, self.logger)
+        except OSError as exc:
+            self.console_logger.warning(
+                "Failed to update Moonlight settings file for host normalization: %s: %s",
+                settings_path,
+                exc,
+            )
+            return False
+
+        return True
 
     def _moonlight_workspace_record_matches_host(
         self,
