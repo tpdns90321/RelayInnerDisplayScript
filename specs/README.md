@@ -1,6 +1,6 @@
 # RelayInnerDisplayScript Specs
 
-This directory contains the current MVP spec set, the implemented console-backend expansion series, the completed Moonlight client series, the implemented Moonlight hardening and live-pair-validation follow-ups, and the implemented Wave 5 compositor-selection plus managed sway runtime contracts for a Proxmox-hosted display relay appliance that mirrors one KVM guest directly onto a host-attached monitor.
+This directory contains the current MVP spec set, the implemented console-backend expansion series, the completed Moonlight client series, the implemented Moonlight hardening and live-pair-validation follow-ups, the implemented Wave 5 compositor-selection plus managed sway runtime contracts, and the repository TDD-cycle workflow specs for a Proxmox-hosted display relay appliance that mirrors one KVM guest directly onto a host-attached monitor.
 
 ## Spec Index
 
@@ -24,6 +24,9 @@ This directory contains the current MVP spec set, the implemented console-backen
 - `51-managed-sway-kiosk-runtime.md`
 - `52-moonlight-on-sway-support-matrix-and-ops.md`
 - `60-moonlight-live-pair-status-validation.md`
+- `70-tdd-cycle-bootstrap-policy-scaffold.md`
+- `71-repository-tdd-policy-and-test-command.md`
+- `72-first-spec-worktree-tdd-pilot.md`
 
 ## Product Summary
 
@@ -42,6 +45,7 @@ RelayInnerDisplayScript turns a Proxmox host with an attached monitor into a sin
 - Spec 51 now implements the managed sway runtime path for Moonlight.
 - Spec 52 remains the follow-up for the Moonlight-on-sway support matrix and operator contract.
 - Spec 60 now defines the live `PairStatus` validation contract so the relay no longer treats persisted Moonlight `srvcert` data as proof of pairing.
+- Specs 70 through 72 define and validate the repository TDD-cycle workflow; the first pilot confirms cycle start in a `tasks/spec-*` worktree and records the current red-phase preflight sandbox gap.
 
 ## Shared Defaults
 
@@ -72,6 +76,9 @@ RelayInnerDisplayScript turns a Proxmox host with an attached monitor into a sin
 16. Spec 51
 17. Spec 52
 18. Spec 60
+19. Spec 70
+20. Spec 71
+21. Spec 72
 
 ## Expansion Plan
 
@@ -83,6 +90,7 @@ Current implementation waves for the console-backend expansion:
 - Wave 4: Spec 40 hardens the Moonlight runtime by decoupling paired `Desktop` launch from daemon-side app-list availability, and Spec 41 adds the next Moonlight config-surface follow-up for client resolution overrides.
 - Wave 5: Specs 50 through 51 now ship the compositor-selection and managed sway runtime contracts; Spec 52 remains for the support-matrix follow-up.
 - Wave 6: Spec 60 hardens Moonlight pair truth by validating live Sunshine `PairStatus` before the relay trusts persisted workspace host data.
+- TDD workflow: Specs 70 through 72 bootstrap, confirm, and pilot the managed TDD-cycle workflow for future implementation work.
 
 Parallelization rule:
 

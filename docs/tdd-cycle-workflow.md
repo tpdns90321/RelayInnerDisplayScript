@@ -4,6 +4,14 @@ This repository has a confirmed TDD-cycle policy in `.pi/tdd-cycle/config.json`.
 
 The TDD-cycle runtime folders `.tdd-cycle/`, `red/`, `green/`, and `refactor/` are disposable local state and are ignored by git.
 
+## First managed pilot status
+
+Spec 72 ran the first managed TDD-cycle pilot from the required `tasks/spec-*` worktree layout. Cycle start succeeded with the confirmed config, created `.tdd-cycle/active.json`, generated `red/`, `green/`, and `refactor/` phase workspaces, and wrote verified phase sandbox files.
+
+The tmux-backed orchestration then blocked in the red phase before repository test changes were made. The red preflight attempted to write `repo/.tdd-cycle-repo-view.json.tmp-*`, but the generated red sandbox only allows test writes under `repo/tests/**`, configured test-output paths, coverage output paths, and the red result file. This is a TDD-cycle tooling/policy gap, not a product-runtime failure.
+
+Until a later TDD-cycle follow-up resolves that preflight temp-file policy, expect managed cycles in this repository to start successfully but potentially block before a red result JSON is written. Keep using the commands below for ordinary repository and phase-workspace verification.
+
 ## Official test commands
 
 From the repository root, run the managed test suite with the standard-library unittest discovery command:
