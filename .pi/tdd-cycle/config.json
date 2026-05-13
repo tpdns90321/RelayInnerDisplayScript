@@ -1,0 +1,43 @@
+{
+  "configVersion": 1,
+  "confirmed": false,
+  "testWriteGlobs": [
+    "tests/**",
+    "**/*.test.*",
+    "**/*.spec.*"
+  ],
+  "greenAllowedTestArtifactGlobs": [],
+  "refactorAllowedTestFiles": [],
+  "coverage": {
+    "enabled": false,
+    "command": "",
+    "summaryFile": "coverage/coverage-summary.json",
+    "metrics": [
+      "total.lines.pct"
+    ],
+    "outputGlobs": [
+      "coverage/**"
+    ]
+  },
+  "testOutputGlobs": [
+    "tmp/test-output/**"
+  ],
+  "network": {
+    "allowedDomains": [],
+    "deniedDomains": []
+  },
+  "denyReadGlobs": [
+    ".env",
+    ".env.*",
+    "**/*.pem",
+    "**/*.key",
+    "**/id_rsa",
+    "**/id_ed25519"
+  ],
+  "timeouts": {
+    "redSeconds": 1800,
+    "greenSeconds": 1800,
+    "refactorSeconds": 1800,
+    "coverageSeconds": 600
+  }
+}

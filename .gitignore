@@ -1,2 +1,8 @@
 tasks
 __pycache__
+
+# TDD cycle runtime
+.tdd-cycle/
+red/
+green/
+refactor/
