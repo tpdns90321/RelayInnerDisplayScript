@@ -1,0 +1,10 @@
+repos:
+  # tdd-cycle coverage gate start
+  - repo: local
+    hooks:
+      - id: tdd-cycle-coverage
+        name: TDD cycle coverage non-regression
+        entry: .pi/tdd-cycle/check-coverage.sh
+        language: system
+        pass_filenames: false
+  # tdd-cycle coverage gate end

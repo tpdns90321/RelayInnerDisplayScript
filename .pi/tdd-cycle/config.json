@@ -7,11 +7,11 @@
   "greenAllowedTestArtifactGlobs": [],
   "refactorAllowedTestFiles": [],
   "coverage": {
-    "enabled": false,
-    "command": "",
+    "enabled": true,
+    "command": "mkdir -p coverage && python -m coverage run --data-file=coverage/.coverage -m unittest discover -s tests -p 'test_*.py' && python -m coverage json --data-file=coverage/.coverage -o coverage/coverage-summary.json",
     "summaryFile": "coverage/coverage-summary.json",
     "metrics": [
-      "total.lines.pct"
+      "totals.percent_covered"
     ],
     "outputGlobs": [
       "coverage/**"

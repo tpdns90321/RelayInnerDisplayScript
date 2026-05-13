@@ -6,3 +6,6 @@ __pycache__
 red/
 green/
 refactor/
+
+# TDD cycle coverage output
+coverage/

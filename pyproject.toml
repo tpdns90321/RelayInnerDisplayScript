@@ -15,6 +15,12 @@ dependencies = [
   "evdev>=1.6",
 ]
 
+[project.optional-dependencies]
+tdd = [
+  "coverage>=7",
+  "pre-commit>=3",
+]
+
 [project.scripts]
 relayinner-displayd = "relayinner_display.daemon:main"
 relayinner-display-kiosk = "relayinner_display.kiosk_launcher:main"

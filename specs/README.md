@@ -27,6 +27,7 @@ This directory contains the current MVP spec set, the implemented console-backen
 - `70-tdd-cycle-bootstrap-policy-scaffold.md`
 - `71-repository-tdd-policy-and-test-command.md`
 - `72-first-spec-worktree-tdd-pilot.md`
+- `73-optional-coverage-non-regression-gate.md`
 
 ## Product Summary
 
@@ -45,7 +46,7 @@ RelayInnerDisplayScript turns a Proxmox host with an attached monitor into a sin
 - Spec 51 now implements the managed sway runtime path for Moonlight.
 - Spec 52 remains the follow-up for the Moonlight-on-sway support matrix and operator contract.
 - Spec 60 now defines the live `PairStatus` validation contract so the relay no longer treats persisted Moonlight `srvcert` data as proof of pairing.
-- Specs 70 through 72 define and validate the repository TDD-cycle workflow; the first pilot confirms cycle start in a `tasks/spec-*` worktree and records the current red-phase preflight sandbox gap.
+- Specs 70 through 73 define and validate the repository TDD-cycle workflow; the first pilot confirms cycle start in a `tasks/spec-*` worktree, records the current red-phase preflight sandbox gap, and enables an optional coverage non-regression gate through `coverage.py` and pre-commit integration.
 
 ## Shared Defaults
 
@@ -79,6 +80,7 @@ RelayInnerDisplayScript turns a Proxmox host with an attached monitor into a sin
 19. Spec 70
 20. Spec 71
 21. Spec 72
+22. Spec 73
 
 ## Expansion Plan
 
@@ -90,7 +92,7 @@ Current implementation waves for the console-backend expansion:
 - Wave 4: Spec 40 hardens the Moonlight runtime by decoupling paired `Desktop` launch from daemon-side app-list availability, and Spec 41 adds the next Moonlight config-surface follow-up for client resolution overrides.
 - Wave 5: Specs 50 through 51 now ship the compositor-selection and managed sway runtime contracts; Spec 52 remains for the support-matrix follow-up.
 - Wave 6: Spec 60 hardens Moonlight pair truth by validating live Sunshine `PairStatus` before the relay trusts persisted workspace host data.
-- TDD workflow: Specs 70 through 72 bootstrap, confirm, and pilot the managed TDD-cycle workflow for future implementation work.
+- TDD workflow: Specs 70 through 73 bootstrap, confirm, pilot, and add optional coverage non-regression enforcement for future implementation work.
 
 Parallelization rule:
 

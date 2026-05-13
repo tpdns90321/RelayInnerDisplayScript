@@ -1,8 +1,8 @@
 # TDD Cycle Workflow
 
-This repository has a confirmed TDD-cycle policy in `.pi/tdd-cycle/config.json`. The policy is intentionally narrow: red-phase test writes are limited to the tracked suite under `tests/**`, green and refactor phases may not edit tests by default, coverage is disabled, and no network domains are allowed unless a later spec changes the policy.
+This repository has a confirmed TDD-cycle policy in `.pi/tdd-cycle/config.json`. The policy is intentionally narrow: red-phase test writes are limited to the tracked suite under `tests/**`, green and refactor phases may not edit tests by default, coverage enforcement is an explicit opt-in gate for managed cycles, and no network domains are allowed unless a later spec changes the policy.
 
-The TDD-cycle runtime folders `.tdd-cycle/`, `red/`, `green/`, and `refactor/` are disposable local state and are ignored by git.
+The TDD-cycle runtime folders `.tdd-cycle/`, `red/`, `green/`, and `refactor/` are disposable local state and are ignored by git. Relay-managed coverage output is written under `coverage/`, which is also ignored by git.
 
 ## First managed pilot status
 
@@ -47,4 +47,26 @@ Validate the checked-in policy from the repository root with strict confirmation
 /path/to/custom-pi-style-skills/tdd-cycle-shared/bin/tdd-cycle.js validate-config --repo-root .
 ```
 
-Coverage remains disabled until a later opt-in spec enables it. Do not introduce `pytest`, `tox`, `nox`, a test wrapper, coverage hooks, or pre-commit hooks as part of this baseline workflow.
+## Optional coverage non-regression gate
+
+Spec 73 enables the managed coverage gate for active TDD cycles. The selected tool is Python `coverage.py`, exposed as the optional project dependency group `tdd`:
+
+```sh
+python -m pip install '.[tdd]'
+```
+
+The configured coverage command is:
+
+```sh
+mkdir -p coverage && python -m coverage run --data-file=coverage/.coverage -m unittest discover -s tests -p 'test_*.py' && python -m coverage json --data-file=coverage/.coverage -o coverage/coverage-summary.json
+```
+
+The configured summary file is `coverage/coverage-summary.json`, the enforced metric is `totals.percent_covered`, and coverage outputs are limited to `coverage/**`.
+
+Coverage setup installed `.pi/tdd-cycle/check-coverage.sh` and integrated it through `.pre-commit-config.yaml` using one managed `tdd-cycle-coverage` local hook block. Install the pre-commit framework from the same optional dependency group and run `pre-commit install` if this checkout should enforce the hook locally. Re-run setup after helper-path changes or local checkout moves:
+
+```sh
+/path/to/custom-pi-style-skills/tdd-cycle-shared/bin/tdd-cycle.js coverage setup --repo-root .
+```
+
+The wrapper exits successfully with `reason: "no-active-cycle"` when no managed cycle is active. During an active coverage-enabled cycle, commits require the cycle-start `coverage-baseline.json`; then the configured coverage metric must stay at or above that baseline.
