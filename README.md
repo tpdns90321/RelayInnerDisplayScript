@@ -6,7 +6,7 @@ The target outcome is a small appliance-like runtime that takes one VM managed b
 
 ## Status
 
-This repository now includes Specs 10 through 17 of the current MVP plan, Specs 20 through 22 for the implemented console-backend expansion series, Specs 30 through 32 for the completed Moonlight client slice, Specs 40 through 41 plus Spec 60 for the implemented Moonlight hardening and live pair-validation follow-ups, Specs 50 through 51 for the implemented kiosk compositor-selection and managed sway runtime contracts, and Spec 52 for the remaining Moonlight-on-sway support-matrix follow-up.
+This repository now includes Specs 10 through 17 of the current MVP plan, Specs 20 through 22 for the implemented console-backend expansion series, Specs 30 through 32 for the completed Moonlight client slice, Specs 40 through 41 plus Spec 60 for the implemented Moonlight hardening and live pair-validation follow-ups, Specs 50 through 51 for the implemented kiosk compositor-selection and managed sway runtime contracts, Spec 52 for the remaining Moonlight-on-sway support-matrix follow-up, and Specs 70 through 71 for the confirmed repository TDD-cycle policy.
 
 - The MVP architecture and behavior are defined in `./specs`.
 - Spec 10 now has a Python implementation for config loading, daemon/session IPC, local Proxmox command wrappers, SPICE `.vv` generation, and reconnect state handling.
@@ -29,6 +29,7 @@ This repository now includes Specs 10 through 17 of the current MVP plan, Specs 
 - Spec 51 now adds the managed sway kiosk runtime: a generated `/run/relayinner-display/sway.config`, output-aware workspace pinning, startup warnings for unavailable pinned outputs, and compositor-specific package selection during install.
 - Spec 52 remains the next Wave 5 follow-up for the Moonlight-on-sway support matrix and operator guidance.
 - Spec 60 now hardens Moonlight pair truth by validating live Sunshine `serverinfo` `PairStatus` with the workspace's persisted Moonlight credentials and pinned host certificate instead of trusting `srvcert` alone.
+- Spec 71 now confirms the repository TDD-cycle policy, limits managed red-phase test writes to `tests/**`, and documents the root and phase-workspace unittest commands in [`./docs/tdd-cycle-workflow.md`](./docs/tdd-cycle-workflow.md).
 - The current design still assumes direct installation on a Proxmox host, not an LXC container.
 
 ## Quickstart
@@ -186,6 +187,8 @@ Operationally, the appliance is expected to move through a small state machine:
 - [Spec 51: Managed Sway Kiosk Runtime](./specs/51-managed-sway-kiosk-runtime.md)
 - [Spec 52: Moonlight on Sway Support Matrix and Ops](./specs/52-moonlight-on-sway-support-matrix-and-ops.md)
 - [Spec 60: Moonlight Live Pair-Status Validation](./specs/60-moonlight-live-pair-status-validation.md)
+- [Spec 70: TDD Cycle Bootstrap Policy Scaffold](./specs/70-tdd-cycle-bootstrap-policy-scaffold.md)
+- [Spec 71: Repository TDD Policy and Test Command](./specs/71-repository-tdd-policy-and-test-command.md)
 
 Recommended implementation order:
 
@@ -207,6 +210,8 @@ Recommended implementation order:
 16. Spec 51
 17. Spec 52
 18. Spec 60
+19. Spec 70
+20. Spec 71
 
 Console-backend expansion status:
 
@@ -265,7 +270,7 @@ The current implementation now manages:
 
 - `relayinner_display/` holds the current Python runtime for Specs 10 through 17 plus the Spec 20 shared console contract layer, the Spec 21/22 VNC and Looking Glass backends, and the Spec 30/31/32 Moonlight backend, pair-assist, and recovery layers.
 - `config.example.toml` is the host bootstrap sample config installed by Specs 14, 16, 20, 21, 22, 30, 31, and 32.
-- `docs/` holds operator-facing setup documentation for the host-direct install path.
+- `docs/` holds operator-facing setup documentation for the host-direct install path and the confirmed TDD-cycle workflow.
 - `install.sh` is the idempotent host bootstrap entrypoint from Specs 14 and 16.
 - `uninstall.sh` is the safe removal entrypoint from Spec 17.
 - `specs/` holds the MVP specification set plus the next console-backend expansion specs.
