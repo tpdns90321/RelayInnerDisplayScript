@@ -51,6 +51,28 @@ class ProxmoxTests(unittest.TestCase):
         )
         self.assertEqual(client.resolve_node_name("auto"), "pve-01")
 
+    def test_node_resolution_fallback_and_single_node_branches(self) -> None:
+        self.assertEqual(ProxmoxClient(timeout_s=10).resolve_node_name("configured"), "configured")
+
+        cases = [
+            (CommandResult(("pvesh",), 1, "", "missing pvesh"), "local"),
+            (CommandResult(("pvesh",), 0, json.dumps({"node": "pve"}), ""), "local"),
+            (CommandResult(("pvesh",), 0, json.dumps(["bad", {"name": "remote"}]), ""), "remote"),
+            (
+                CommandResult(("pvesh",), 0, json.dumps([{"node": "remote-a"}, {"name": "remote-b"}]), ""),
+                "local",
+            ),
+        ]
+
+        for result, expected_node in cases:
+            with self.subTest(expected_node=expected_node, stdout=result.stdout):
+                client = ProxmoxClient(
+                    timeout_s=10,
+                    runner=lambda command, timeout_s, result=result: result,
+                    hostname_resolver=lambda: "local",
+                )
+                self.assertEqual(client.resolve_node_name("auto"), expected_node)
+
     def test_get_vm_status_parses_qm_output(self) -> None:
         def runner(command: list[str], timeout_s: int) -> CommandResult:
             return CommandResult(
