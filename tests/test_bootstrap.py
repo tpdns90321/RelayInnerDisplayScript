@@ -217,6 +217,38 @@ class BootstrapTests(unittest.TestCase):
             ):
                 self.assertEqual(detect_drm_device_groups(device_dir), ("video", "render"))
 
+    def test_detect_drm_device_groups_skips_unreadable_and_uses_numeric_gid(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            device_dir = Path(temp_dir)
+            (device_dir / "card0").write_text("", encoding="utf-8")
+            (device_dir / "renderD128").write_text("", encoding="utf-8")
+            original_stat = Path.stat
+
+            def fake_stat(path: Path, *args: object, **kwargs: object) -> os.stat_result:
+                if path.name == "card0":
+                    raise OSError("gone")
+                stat_result = original_stat(path, *args, **kwargs)
+                return os.stat_result(
+                    (
+                        stat_result.st_mode,
+                        stat_result.st_ino,
+                        stat_result.st_dev,
+                        stat_result.st_nlink,
+                        stat_result.st_uid,
+                        104,
+                        stat_result.st_size,
+                        stat_result.st_atime,
+                        stat_result.st_mtime,
+                        stat_result.st_ctime,
+                    )
+                )
+
+            with patch("pathlib.Path.stat", new=fake_stat), patch(
+                "relayinner_display.bootstrap.grp.getgrgid",
+                side_effect=KeyError(104),
+            ):
+                self.assertEqual(detect_drm_device_groups(device_dir), ("104",))
+
     def test_installed_commands_target_host_paths(self) -> None:
         paths = HostInstallPaths()
         self.assertEqual(
@@ -327,6 +359,33 @@ class BootstrapTests(unittest.TestCase):
         )
         with self.assertRaises(BootstrapError):
             installer.validate_host()
+
+    def test_install_validates_host_and_replaces_existing_package_tree(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        runner = FakeRunner()
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            systemd_runtime_path = root / "run/systemd/system"
+            systemd_runtime_path.mkdir(parents=True)
+            old_package_dir = root / "usr/local/lib/relayinner-display/relayinner_display"
+            old_package_dir.mkdir(parents=True)
+            (old_package_dir / "old.py").write_text("old\n", encoding="utf-8")
+
+            installer = HostBootstrapInstaller(
+                repo_root=repo_root,
+                install_root=root,
+                command_runner=runner,
+                output=lambda _: None,
+                pveversion_finder=lambda _: "/usr/bin/pveversion",
+                systemd_runtime_path=systemd_runtime_path,
+                now_provider=lambda: FIXED_INSTALL_TIME,
+                service_user_exists_checker=lambda _: True,
+                kiosk_supplementary_groups_detector=lambda: (),
+            )
+            installer.install(skip_host_validation=False, skip_package_install=True, replace_config=False)
+
+            self.assertFalse((old_package_dir / "old.py").exists())
+            self.assertTrue((old_package_dir / "bootstrap.py").exists())
 
     def test_install_preserves_existing_config_and_enables_services(self) -> None:
         repo_root = Path(__file__).resolve().parents[1]
@@ -574,6 +633,38 @@ class BootstrapTests(unittest.TestCase):
             self.assertIn(["systemctl", "enable", "getty@tty1.service"], runner.commands)
             self.assertIn(["systemctl", "start", "getty@tty1.service"], runner.commands)
 
+    def test_uninstall_rejects_unreadable_install_state_and_absent_service_user(self) -> None:
+        paths = HostInstallPaths()
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            install_state_path = self.stage_path(root, paths.install_state_path)
+            install_state_path.parent.mkdir(parents=True)
+            install_state_path.write_text("{not-json", encoding="utf-8")
+            installer = self.make_installer(
+                root=root,
+                runner=FakeRunner(),
+                output=lambda _: None,
+                service_user_exists=False,
+            )
+            with self.assertRaisesRegex(BootstrapError, "unreadable"):
+                installer.uninstall()
+
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            self.install_fixture(root=root, service_user_exists=False)
+            outputs: list[str] = []
+            runner = FakeRunner()
+            installer = self.make_installer(
+                root=root,
+                runner=runner,
+                output=outputs.append,
+                service_user_exists=False,
+            )
+            installer.uninstall()
+
+            self.assertIn(f"Service user {SERVICE_USER!r} is already absent", outputs)
+            self.assertNotIn(["userdel", SERVICE_USER], runner.commands)
+
     def test_uninstall_restores_getty_without_enabling_when_it_was_previously_disabled(self) -> None:
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -675,6 +766,8 @@ class BootstrapTests(unittest.TestCase):
             required_packages_for_kiosk_compositor("sway"),
             ("python3", "python3-evdev", "seatd", "virt-viewer", "wlr-randr", "sway"),
         )
+        with self.assertRaisesRegex(BootstrapError, "Unsupported kiosk compositor"):
+            required_packages_for_kiosk_compositor("river")
 
     def test_install_packages_use_existing_configured_compositor(self) -> None:
         runner = FakeRunner()
