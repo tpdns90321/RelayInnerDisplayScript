@@ -78,6 +78,96 @@ class ConfigTests(unittest.TestCase):
             with self.assertRaisesRegex(ConfigError, "Invalid TOML"):
                 load_config(invalid_path)
 
+    def test_load_config_reports_remaining_validation_branches(self) -> None:
+        moonlight_config = VALID_CONFIG.replace(
+            'console_backend = "spice"',
+            'console_backend = "moonlight"',
+        ).replace(
+            '[console.spice]\nvv_path = "/run/relayinner-display/console/spice-current.vv"\n',
+            '[console.moonlight]\nhost = "sunshine.local"\nbase_port = 48010\nresolution = "1280x720"\n',
+        )
+        cases = {
+            "reconnect-order": (
+                VALID_CONFIG.replace("reconnect_initial_ms = 1000", "reconnect_initial_ms = 20000"),
+                "reconnect_initial_ms",
+            ),
+            "stopped-action": (VALID_CONFIG + '\npower_button_action_when_stopped = "poweroff"\n', "when_stopped"),
+            "invalid-console-subtable": (
+                VALID_CONFIG.replace(
+                    '[console.spice]\nvv_path = "/run/relayinner-display/console/spice-current.vv"\n',
+                    'spice = "invalid"\n',
+                ),
+                "Invalid \\[spice\\] table",
+            ),
+            "invalid-display-output": (
+                VALID_CONFIG.replace("\n\n[policy]", "\n\n[display]\noutput_name = 5\n\n[policy]"),
+                "output_name",
+            ),
+            "invalid-vmid": (VALID_CONFIG.replace("vmid = 101", "vmid = true"), "vmid"),
+            "invalid-shutdown-timeout": (VALID_CONFIG + "\nshutdown_timeout_s = -1\n", "shutdown_timeout_s"),
+            "invalid-input-bool": (
+                VALID_CONFIG.replace("\n\n[policy]", "\n\n[input]\nforward_power_button = \"yes\"\n\n[policy]"),
+                "forward_power_button",
+            ),
+            "invalid-artifact-dir-type": (
+                VALID_CONFIG.replace('artifact_dir = "/run/relayinner-display/console"', "artifact_dir = 5"),
+                "artifact_dir",
+            ),
+            "unexpected-spice-key": (
+                VALID_CONFIG.replace(
+                    'vv_path = "/run/relayinner-display/console/spice-current.vv"',
+                    'vv_path = "/run/relayinner-display/console/spice-current.vv"\nextra = true',
+                ),
+                "Unexpected field",
+            ),
+            "unexpected-console-table": (VALID_CONFIG + "\n[console.serial]\npath = '/dev/ttyS0'\n", "Unexpected table"),
+            "control-socket-outside-run-dir": (
+                VALID_CONFIG.replace(
+                    'control_socket = "/run/relayinner-display/session.sock"',
+                    'control_socket = "/tmp/session.sock"',
+                ),
+                "runtime.control_socket must live under",
+            ),
+            "invalid-moonlight-resolution-type": (
+                moonlight_config.replace('resolution = "1280x720"', "resolution = 1080"),
+                "resolution",
+            ),
+        }
+        with TemporaryDirectory() as temp_dir:
+            for name, (content, pattern) in cases.items():
+                with self.subTest(name=name):
+                    config_path = Path(temp_dir) / f"{name}.toml"
+                    config_path.write_text(content, encoding="utf-8")
+                    with self.assertRaisesRegex(ConfigError, pattern):
+                        load_config(config_path)
+
+    def test_load_config_uses_default_spice_path_and_hostname_moonlight_authority(self) -> None:
+        spice_without_block = VALID_CONFIG.replace(
+            '[console.spice]\nvv_path = "/run/relayinner-display/console/spice-current.vv"\n',
+            "",
+        )
+        moonlight_config = VALID_CONFIG.replace(
+            'console_backend = "spice"',
+            'console_backend = "moonlight"',
+        ).replace(
+            '[console.spice]\nvv_path = "/run/relayinner-display/console/spice-current.vv"\n',
+            '[console.moonlight]\nhost = "sunshine.local"\nbase_port = 48010\nresolution = "1280x720"\n',
+        )
+        with TemporaryDirectory() as temp_dir:
+            spice_path = Path(temp_dir) / "spice.toml"
+            spice_path.write_text(spice_without_block, encoding="utf-8")
+            spice_config = load_config(spice_path)
+            self.assertEqual(
+                spice_config.console.spice.vv_path,
+                Path("/run/relayinner-display/console/spice-current.vv"),
+            )
+
+            moonlight_path = Path(temp_dir) / "moonlight.toml"
+            moonlight_path.write_text(moonlight_config, encoding="utf-8")
+            moonlight = load_config(moonlight_path).console.moonlight
+            self.assertEqual(moonlight.host_authority, "sunshine.local:48010")
+            self.assertEqual(moonlight.resolution, "1280x720")
+
     def test_load_config_accepts_display_overrides(self) -> None:
         content = VALID_CONFIG.replace(
             'command_timeout_s = 10\n',
