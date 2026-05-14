@@ -150,6 +150,15 @@ class FakePowerButtonSource:
         self.closed = True
 
 
+class FailingPowerButtonSource(FakePowerButtonSource):
+    def __init__(self, error: Exception) -> None:
+        super().__init__([])
+        self.error = error
+
+    def poll_presses(self) -> int:
+        raise self.error
+
+
 class FakePolicyChecker:
     def validate(self) -> None:
         return None
@@ -2308,6 +2317,104 @@ class DisplayDaemonTests(unittest.TestCase):
         self.assertEqual(proxmox.shutdown_calls, [(101, 90)])
         self.assertEqual(daemon.state.last_power_button_action, "shutdown")
         self.assertEqual(daemon.state.last_power_button_result, "ignored_debounced")
+        self.assertFalse(daemon.state.power_button_action_in_flight)
+
+    def test_power_button_read_failure_disables_forwarding_into_degraded(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            config = build_config(Path(temp_dir), forward_power_button=True)
+            source = FailingPowerButtonSource(OSError("device vanished"))
+            daemon = DisplayDaemon(
+                config=config,
+                proxmox=FakeProxmoxClient(["running"]),
+                power_button_source=source,
+                host_policy_checker=FakePolicyChecker(),
+            )
+            start_time = datetime(2026, 4, 4, 0, 0, tzinfo=timezone.utc)
+
+            daemon.prepare_runtime()
+            daemon.start(now=start_time)
+            actions = daemon.tick(now=start_time)
+
+        self.assertEqual(actions, [])
+        self.assertTrue(source.closed)
+        self.assertEqual(daemon.state.session_state, SessionState.DEGRADED)
+        self.assertEqual(daemon.state.degraded_reason, "Power-button device read failed: device vanished")
+
+    def test_power_button_press_records_status_read_failure(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            config = build_config(Path(temp_dir), forward_power_button=True)
+            daemon = DisplayDaemon(
+                config=config,
+                proxmox=FailingProxmoxClient(),
+                power_button_source=FakePowerButtonSource([1]),
+                host_policy_checker=FakePolicyChecker(),
+            )
+            start_time = datetime(2026, 4, 4, 0, 0, tzinfo=timezone.utc)
+
+            daemon.prepare_runtime()
+            daemon.start(now=start_time)
+            daemon.tick(now=start_time)
+
+        self.assertEqual(daemon.state.last_power_button_result, "status_failed")
+        self.assertEqual(daemon.state.last_error, "qm failed: missing VM")
+
+    def test_power_button_start_action_records_stall_and_timeout(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            config = build_config(Path(temp_dir), forward_power_button=True, debounce_ms=2000)
+            daemon = DisplayDaemon(
+                config=config,
+                proxmox=FakeProxmoxClient(["stopped", "stopped", "stopped"]),
+                power_button_source=FakePowerButtonSource([1, 0]),
+                host_policy_checker=FakePolicyChecker(),
+            )
+            start_time = datetime(2026, 4, 4, 0, 0, tzinfo=timezone.utc)
+
+            daemon.prepare_runtime()
+            daemon.start(now=start_time)
+            daemon.tick(now=start_time)
+            daemon.tick(now=start_time + timedelta(milliseconds=2000))
+
+        self.assertEqual(daemon.state.last_power_button_action, "start")
+        self.assertEqual(daemon.state.last_power_button_result, "stalled")
+        self.assertFalse(daemon.state.power_button_action_in_flight)
+
+        with TemporaryDirectory() as temp_dir:
+            config = build_config(Path(temp_dir), forward_power_button=True, debounce_ms=2000)
+            daemon = DisplayDaemon(
+                config=config,
+                proxmox=FakeProxmoxClient(["stopped", "starting", "starting"]),
+                power_button_source=FakePowerButtonSource([1, 0]),
+                host_policy_checker=FakePolicyChecker(),
+            )
+            start_time = datetime(2026, 4, 4, 0, 0, tzinfo=timezone.utc)
+
+            daemon.prepare_runtime()
+            daemon.start(now=start_time)
+            daemon.tick(now=start_time)
+            daemon.tick(now=start_time + timedelta(seconds=90))
+
+        self.assertEqual(daemon.state.last_power_button_action, "start")
+        self.assertEqual(daemon.state.last_power_button_result, "timed_out")
+        self.assertFalse(daemon.state.power_button_action_in_flight)
+
+    def test_power_button_shutdown_action_records_timeout(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            config = build_config(Path(temp_dir), forward_power_button=True)
+            daemon = DisplayDaemon(
+                config=config,
+                proxmox=FakeProxmoxClient(["running", "running"]),
+                power_button_source=FakePowerButtonSource([1, 0]),
+                host_policy_checker=FakePolicyChecker(),
+            )
+            start_time = datetime(2026, 4, 4, 0, 0, tzinfo=timezone.utc)
+
+            daemon.prepare_runtime()
+            daemon.start(now=start_time)
+            daemon.tick(now=start_time)
+            daemon.tick(now=start_time + timedelta(seconds=90))
+
+        self.assertEqual(daemon.state.last_power_button_action, "shutdown")
+        self.assertEqual(daemon.state.last_power_button_result, "timed_out")
         self.assertFalse(daemon.state.power_button_action_in_flight)
 
     def test_startup_validation_failure_enters_degraded(self) -> None:
