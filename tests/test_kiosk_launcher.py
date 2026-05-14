@@ -382,6 +382,22 @@ class KioskLauncherTests(unittest.TestCase):
         self.assertIn("console_backend='spice'", stderr.getvalue())
         self.assertIn("kiosk.compositor='sway'", stderr.getvalue())
 
+    def test_main_reports_exec_failure(self) -> None:
+        def failing_exec(program: str, argv: list[str], env: dict[str, str]) -> None:
+            raise OSError("not executable")
+
+        with TemporaryDirectory() as temp_dir:
+            config_path = write_config(Path(temp_dir), backend="spice")
+            stderr = StringIO()
+            with redirect_stderr(stderr):
+                result = main(["--config", str(config_path)], execvpe=failing_exec)
+
+        self.assertEqual(result, 127)
+        self.assertIn(
+            "relayinner-display-kiosk: failed to exec cage: not executable",
+            stderr.getvalue(),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
