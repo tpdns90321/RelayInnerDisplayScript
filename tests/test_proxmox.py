@@ -85,6 +85,19 @@ class ProxmoxTests(unittest.TestCase):
         client = ProxmoxClient(timeout_s=10, runner=runner)
         self.assertEqual(client.get_vm_status(101), "running")
 
+    def test_get_vm_status_rejects_unexpected_qm_output(self) -> None:
+        def runner(command: list[str], timeout_s: int) -> CommandResult:
+            return CommandResult(
+                args=tuple(command),
+                returncode=0,
+                stdout="VM 101 is running\n",
+                stderr="",
+            )
+
+        client = ProxmoxClient(timeout_s=10, runner=runner)
+        with self.assertRaisesRegex(ProxmoxCommandError, "unexpected output for VM 101"):
+            client.get_vm_status(101)
+
     def test_request_spice_config_generates_vv_file(self) -> None:
         def runner(command: list[str], timeout_s: int) -> CommandResult:
             self.assertIn("--proxy", command)
