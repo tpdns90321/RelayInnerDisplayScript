@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 from io import StringIO
+import runpy
+import sys
 from unittest.mock import patch
 import unittest
+import warnings
 
 from relayinner_display.kiosk import main
 
@@ -62,6 +65,30 @@ class KioskTests(unittest.TestCase):
             "relayinner-display-session-entrypoint: failed to exec /opt/bin/session: not executable",
             stderr.getvalue(),
         )
+
+    def test_module_entrypoint_dispatches_to_main(self) -> None:
+        captured: dict[str, object] = {}
+
+        def fake_exec(program: str, argv: list[str], env: dict[str, str]) -> None:
+            captured["program"] = program
+            captured["argv"] = argv
+
+        with (
+            patch("os.execvpe", side_effect=fake_exec),
+            patch.object(sys, "argv", ["relayinner-display-session-entrypoint", "--session-binary", "/opt/bin/session"]),
+            warnings.catch_warnings(),
+            self.assertRaises(SystemExit) as raised,
+        ):
+            warnings.filterwarnings(
+                "ignore",
+                message="'relayinner_display.kiosk' found in sys.modules.*",
+                category=RuntimeWarning,
+            )
+            runpy.run_module("relayinner_display.kiosk", run_name="__main__")
+
+        self.assertEqual(raised.exception.code, 0)
+        self.assertEqual(captured["program"], "/opt/bin/session")
+        self.assertEqual(captured["argv"], ["/opt/bin/session", "--config", "/etc/relayinner-display/config.toml"])
 
     def test_entrypoint_uses_absolute_installed_session_launcher_without_path(self) -> None:
         captured: dict[str, object] = {}
