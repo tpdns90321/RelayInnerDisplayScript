@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import builtins
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 
 from relayinner_display.input import EvdevPowerButtonSource, LogindPowerButtonPolicyChecker, PowerButtonError
 
@@ -13,6 +15,21 @@ class EvdevPowerButtonSourceTests(unittest.TestCase):
 
         self.assertEqual(source.device_path, Path("/dev/input/event0"))
         self.assertEqual(source.poll_presses(), 0)
+
+    def test_open_requires_python_evdev_dependency(self) -> None:
+        source = EvdevPowerButtonSource("/dev/input/event0")
+        real_import = builtins.__import__
+
+        def reject_evdev(name: str, *args: object, **kwargs: object) -> object:
+            if name == "evdev":
+                raise ImportError("no evdev")
+            return real_import(name, *args, **kwargs)
+
+        with (
+            patch("builtins.__import__", side_effect=reject_evdev),
+            self.assertRaisesRegex(PowerButtonError, "python-evdev is required"),
+        ):
+            source.open()
 
 
 class LogindPowerButtonPolicyCheckerTests(unittest.TestCase):
