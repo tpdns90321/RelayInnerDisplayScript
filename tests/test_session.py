@@ -130,6 +130,14 @@ class SessionSocketClientTests(unittest.TestCase):
         self.assertEqual(created_sockets[0].connected_path, "/run/relayinner-display/session.sock")
         self.assertFalse(created_sockets[0].blocking)
 
+    def test_read_messages_without_connection_reports_disconnected(self) -> None:
+        client = SessionSocketClient(Path("/run/relayinner-display/session.sock"))
+
+        messages, disconnected = client.read_messages()
+
+        self.assertEqual(messages, [])
+        self.assertTrue(disconnected)
+
     def test_send_message_serializes_payload_and_clears_connection_after_write_error(self) -> None:
         client = SessionSocketClient(Path("/run/relayinner-display/session.sock"))
         self.assertFalse(client.send_message({"type": "session_ready"}))
