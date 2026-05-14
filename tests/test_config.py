@@ -680,7 +680,7 @@ class ConfigTests(unittest.TestCase):
                 load_config(config_path)
 
     def test_moonlight_host_must_be_valid(self) -> None:
-        for host in ("", "https://sunshine.example", "[2001:db8::20]", "bad host"):
+        for host in ("", "https://sunshine.example", "[2001:db8::20]", "bad host", "bad_host"):
             with self.subTest(host=host):
                 content = VALID_CONFIG.replace(
                     'console_backend = "spice"',
