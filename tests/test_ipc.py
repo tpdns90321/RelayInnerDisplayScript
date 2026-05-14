@@ -69,6 +69,20 @@ class IPCTests(unittest.TestCase):
         with self.assertRaises(IPCError):
             validate_daemon_message(payload)
 
+    def test_decode_rejects_malformed_payloads(self) -> None:
+        cases = [
+            ("   ", "IPC message must not be empty"),
+            ("not json", "Invalid JSON IPC payload"),
+            ("[]", "IPC payload must be a JSON object"),
+            ('{"type":""}', "IPC payload must contain a non-empty string 'type'"),
+            ('{"type": 1}', "IPC payload must contain a non-empty string 'type'"),
+        ]
+
+        for raw_payload, message in cases:
+            with self.subTest(raw_payload=raw_payload):
+                with self.assertRaisesRegex(IPCError, message):
+                    decode_message(raw_payload)
+
     def test_invalid_power_state_is_rejected(self) -> None:
         with self.assertRaises(IPCError):
             validate_daemon_message({"type": "display_power", "state": "sleep", "output": ""})
