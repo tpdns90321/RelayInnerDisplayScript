@@ -4,7 +4,15 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 
-from relayinner_display.input import LogindPowerButtonPolicyChecker, PowerButtonError
+from relayinner_display.input import EvdevPowerButtonSource, LogindPowerButtonPolicyChecker, PowerButtonError
+
+
+class EvdevPowerButtonSourceTests(unittest.TestCase):
+    def test_unopened_source_reports_no_presses(self) -> None:
+        source = EvdevPowerButtonSource("/dev/input/event0")
+
+        self.assertEqual(source.device_path, Path("/dev/input/event0"))
+        self.assertEqual(source.poll_presses(), 0)
 
 
 class LogindPowerButtonPolicyCheckerTests(unittest.TestCase):
