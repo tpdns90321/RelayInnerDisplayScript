@@ -369,6 +369,16 @@ class DaemonHelperTests(unittest.TestCase):
         self.assertTrue(send_connection.closed)
         self.assertIsNone(server.connection)
 
+        peer_closed_connection = FakeDaemonConnection([b""])
+        server.connection = peer_closed_connection
+
+        messages, disconnected = server.read_messages()
+
+        self.assertEqual(messages, [])
+        self.assertTrue(disconnected)
+        self.assertTrue(peer_closed_connection.closed)
+        self.assertIsNone(server.connection)
+
     def test_session_socket_server_noops_without_pending_or_active_client(self) -> None:
         with TemporaryDirectory() as temp_dir:
             socket_path = Path(temp_dir) / "daemon.sock"
@@ -404,6 +414,49 @@ class DisplayDaemonTests(unittest.TestCase):
         self.assertEqual(daemon.started_at, start_time)
         self.assertEqual(daemon.state.session_state, SessionState.DEGRADED)
         self.assertEqual(daemon.state.degraded_reason, "preflight failed")
+
+    def test_prepare_runtime_removes_stale_socket_and_console_artifacts(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            config = build_config(Path(temp_dir))
+            config.runtime.control_socket.parent.mkdir(parents=True, exist_ok=True)
+            config.console.artifact_dir.mkdir(parents=True, exist_ok=True)
+            config.runtime.control_socket.write_text("stale socket", encoding="utf-8")
+            assert config.console.spice is not None
+            config.console.spice.vv_path.write_text("stale spice", encoding="utf-8")
+            daemon = DisplayDaemon(config=config, proxmox=FakeProxmoxClient(["stopped"]))
+
+            daemon.prepare_runtime()
+
+        self.assertFalse(config.runtime.control_socket.exists())
+        self.assertFalse(config.console.spice.vv_path.exists())
+
+    def test_session_ready_waits_for_stopped_vm_and_degraded_power_poll_noops(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            config = build_config(Path(temp_dir))
+            daemon = DisplayDaemon(
+                config=config,
+                proxmox=FakeProxmoxClient(["stopped"]),
+                startup_error="preflight failed",
+            )
+            start_time = datetime(2026, 4, 4, 0, 0, tzinfo=timezone.utc)
+            daemon.prepare_runtime()
+            daemon.start(now=start_time)
+            power_actions = daemon._poll_power_button_source(start_time)
+
+            waiting_daemon = DisplayDaemon(config=config, proxmox=FakeProxmoxClient(["stopped"]))
+            waiting_daemon.prepare_runtime()
+            waiting_daemon.start(now=start_time)
+            ready_actions = waiting_daemon.handle_session_message({"type": "session_ready"}, now=start_time)
+
+        self.assertEqual(power_actions, [])
+        self.assertEqual(
+            ready_actions,
+            [
+                {"type": "display_power", "state": "on", "output": ""},
+                {"type": "show_waiting", "reason": "vm_stopped"},
+            ],
+        )
+        self.assertEqual(waiting_daemon.state.session_state, SessionState.WAITING_FOR_VM)
 
     def test_session_ready_and_disconnect_preserve_degraded_state(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -3350,6 +3403,73 @@ class DisplayDaemonTests(unittest.TestCase):
         self.assertEqual(daemon.disconnects, 1)
         self.assertTrue(daemon.closed)
         self.assertTrue(socket_instances[0].closed)
+
+    def test_run_continues_after_message_send_failure_and_handles_tick_send_failure(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            config = build_config(Path(temp_dir))
+            daemon_instances: list[object] = []
+
+            class FakeRunDaemon:
+                def __init__(self, **kwargs: object) -> None:
+                    self.disconnects = 0
+                    self.closed = False
+                    daemon_instances.append(self)
+
+                def prepare_runtime(self) -> None:
+                    pass
+
+                def start(self) -> None:
+                    pass
+
+                def on_session_disconnected(self) -> None:
+                    self.disconnects += 1
+
+                def handle_session_message(self, message: dict[str, object]) -> list[dict[str, object]]:
+                    return [{"type": "handled"}]
+
+                def tick(self) -> list[dict[str, object]]:
+                    return [{"type": "tick"}]
+
+                def close(self) -> None:
+                    self.closed = True
+
+            class FakeRunSocketServer:
+                def __init__(self, path: Path, logger: object) -> None:
+                    self.read_index = 0
+                    self.send_index = 0
+
+                def start(self) -> None:
+                    pass
+
+                def accept_pending(self) -> None:
+                    pass
+
+                def read_messages(self) -> tuple[list[dict[str, object]], bool]:
+                    self.read_index += 1
+                    if self.read_index == 1:
+                        return [{"type": "session_ready"}], False
+                    return [], False
+
+                def send_message(self, message: dict[str, object]) -> bool:
+                    self.send_index += 1
+                    return False
+
+                def close(self) -> None:
+                    pass
+
+            with patch("relayinner_display.daemon.load_config", return_value=config), patch(
+                "relayinner_display.daemon.DisplayDaemon",
+                FakeRunDaemon,
+            ), patch("relayinner_display.daemon.SessionSocketServer", FakeRunSocketServer), patch(
+                "relayinner_display.daemon.time.sleep",
+                side_effect=[None, KeyboardInterrupt],
+            ):
+                with self.assertRaises(KeyboardInterrupt):
+                    __import__("relayinner_display.daemon").daemon.run(Path("config.toml"))
+
+        daemon = daemon_instances[0]
+        self.assertEqual(daemon.disconnects, 2)
+        self.assertTrue(daemon.closed)
 
     def test_main_parses_config_argument_and_delegates_to_run(self) -> None:
         with patch("relayinner_display.daemon.run", return_value=23) as run_mock:
