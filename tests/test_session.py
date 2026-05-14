@@ -1352,6 +1352,44 @@ class SessionRuntimeTests(unittest.TestCase):
         self.assertTrue(connected_socket.closed)
         self.assertEqual(sleep_delays, [2.0])
 
+    def test_run_keeps_connection_open_after_health_ping(self) -> None:
+        class StopLoop(Exception):
+            pass
+
+        observed_paths: list[str] = []
+        sleep_delays: list[float] = []
+
+        class HealthPingSocket(FakeSocket):
+            def __init__(self) -> None:
+                super().__init__([b'{"type":"health_ping"}\n'])
+                self.blocking: bool | None = None
+
+            def connect(self, path: str) -> None:
+                observed_paths.append(path)
+
+            def setblocking(self, blocking: bool) -> None:
+                self.blocking = blocking
+
+        connected_socket = HealthPingSocket()
+
+        def stop_after_inner_poll(delay: float) -> None:
+            sleep_delays.append(delay)
+            raise StopLoop
+
+        with (
+            patch("relayinner_display.session.load_config", return_value=build_config()),
+            patch("relayinner_display.session.socket.socket", return_value=connected_socket),
+            patch("relayinner_display.session.time.sleep", side_effect=stop_after_inner_poll),
+            self.assertRaises(StopLoop),
+        ):
+            run(Path("/tmp/relayinner-session.toml"))
+
+        self.assertEqual(observed_paths, ["/run/relayinner-display/session.sock"])
+        self.assertFalse(connected_socket.blocking)
+        self.assertEqual(connected_socket.sent, [b'{"type":"session_ready"}\n'])
+        self.assertFalse(connected_socket.closed)
+        self.assertEqual(sleep_delays, [2.0])
+
     def test_run_logs_invalid_config_and_retries_with_fallback_socket(self) -> None:
         class StopLoop(Exception):
             pass
