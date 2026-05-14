@@ -26,6 +26,8 @@ from relayinner_display.config import (
 )
 from relayinner_display.daemon import (
     DisplayDaemon,
+    MoonlightServerInfoAuthError,
+    MoonlightServerInfoConnectionError,
     RuntimeValidationError,
     SessionSocketServer,
     generate_moonlight_pin,
@@ -1430,6 +1432,290 @@ class DisplayDaemonTests(unittest.TestCase):
                 (47984, True, ("client\ncert", "client\nkey")),
             ],
         )
+
+    def test_moonlight_serverinfo_request_uses_http_and_https_clients(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            state_dir = Path(temp_dir) / "moonlight-state"
+            config = build_config(Path(temp_dir), backend="moonlight", moonlight_state_dir=state_dir)
+            daemon = DisplayDaemon(config=config, proxmox=FakeProxmoxClient(["running"]))
+            daemon.prepare_runtime()
+
+            class FakeResponse:
+                def read(self) -> bytes:
+                    return b"serverinfo-payload"
+
+            class FakeHttpConnection:
+                calls: list[tuple[object, ...]] = []
+                closed = False
+
+                def __init__(self, host: str, port: int, timeout: int) -> None:
+                    self.__class__.calls.append((host, port, timeout))
+
+                def request(self, method: str, path: str) -> None:
+                    self.__class__.calls.append((method, path.startswith("/serverinfo?uniqueid=")))
+
+                def getresponse(self) -> FakeResponse:
+                    return FakeResponse()
+
+                def close(self) -> None:
+                    self.__class__.closed = True
+
+            class FakeContext:
+                def __init__(self, cadata: str) -> None:
+                    self.cadata = cadata
+                    self.check_hostname = True
+                    self.cert_paths: tuple[Path, Path] | None = None
+
+                def load_cert_chain(self, *, certfile: str, keyfile: str) -> None:
+                    cert_path = Path(certfile)
+                    key_path = Path(keyfile)
+                    self.cert_paths = (cert_path, key_path)
+                    self.loaded_contents = (cert_path.read_text(), key_path.read_text())
+
+            class FakeHttpsConnection(FakeHttpConnection):
+                context: FakeContext | None = None
+
+                def __init__(self, host: str, port: int, timeout: int, context: FakeContext) -> None:
+                    super().__init__(host, port, timeout)
+                    self.__class__.context = context
+
+            created_contexts: list[FakeContext] = []
+
+            def fake_create_default_context(*, cadata: str) -> FakeContext:
+                context = FakeContext(cadata)
+                created_contexts.append(context)
+                return context
+
+            with patch("relayinner_display.daemon.http.client.HTTPConnection", FakeHttpConnection):
+                http_payload = daemon._request_moonlight_serverinfo(
+                    host="192.168.50.20",
+                    port=47989,
+                    host_authority="192.168.50.20",
+                )
+
+            with patch("relayinner_display.daemon.http.client.HTTPSConnection", FakeHttpsConnection), patch(
+                "relayinner_display.daemon.ssl.create_default_context",
+                side_effect=fake_create_default_context,
+            ):
+                https_payload = daemon._request_moonlight_serverinfo(
+                    host="192.168.50.20",
+                    port=47984,
+                    host_authority="192.168.50.20",
+                    server_certificate="server-cert",
+                    client_credentials=("client-cert", "client-key"),
+                )
+
+        self.assertEqual(http_payload, "serverinfo-payload")
+        self.assertEqual(https_payload, "serverinfo-payload")
+        self.assertTrue(FakeHttpConnection.closed)
+        self.assertEqual(created_contexts[0].cadata, "server-cert")
+        self.assertFalse(created_contexts[0].check_hostname)
+        self.assertEqual(created_contexts[0].loaded_contents, ("client-cert", "client-key"))
+        self.assertIsNotNone(created_contexts[0].cert_paths)
+        assert created_contexts[0].cert_paths is not None
+        self.assertFalse(created_contexts[0].cert_paths[0].exists())
+        self.assertFalse(created_contexts[0].cert_paths[1].exists())
+
+    def test_moonlight_serverinfo_request_reports_empty_and_connection_failures(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            state_dir = Path(temp_dir) / "moonlight-state"
+            config = build_config(Path(temp_dir), backend="moonlight", moonlight_state_dir=state_dir)
+            daemon = DisplayDaemon(config=config, proxmox=FakeProxmoxClient(["running"]))
+            daemon.prepare_runtime()
+
+            class EmptyResponse:
+                def read(self) -> bytes:
+                    return b"   "
+
+            class EmptyConnection:
+                closed = False
+
+                def __init__(self, host: str, port: int, timeout: int) -> None:
+                    pass
+
+                def request(self, method: str, path: str) -> None:
+                    pass
+
+                def getresponse(self) -> EmptyResponse:
+                    return EmptyResponse()
+
+                def close(self) -> None:
+                    self.__class__.closed = True
+
+            class BrokenConnection(EmptyConnection):
+                def request(self, method: str, path: str) -> None:
+                    raise OSError("network down")
+
+            with patch("relayinner_display.daemon.http.client.HTTPConnection", EmptyConnection):
+                with self.assertRaisesRegex(RuntimeValidationError, "empty response"):
+                    daemon._request_moonlight_serverinfo(
+                        host="192.168.50.20",
+                        port=47989,
+                        host_authority="192.168.50.20",
+                    )
+            self.assertTrue(EmptyConnection.closed)
+
+            with patch("relayinner_display.daemon.http.client.HTTPConnection", BrokenConnection):
+                with self.assertRaisesRegex(MoonlightServerInfoConnectionError, "network down"):
+                    daemon._request_moonlight_serverinfo(
+                        host="192.168.50.20",
+                        port=47989,
+                        host_authority="192.168.50.20",
+                    )
+            self.assertTrue(BrokenConnection.closed)
+
+            with patch(
+                "relayinner_display.daemon.ssl.create_default_context",
+                side_effect=RuntimeValidationError("bad server certificate"),
+            ):
+                with self.assertRaisesRegex(RuntimeValidationError, "bad server certificate"):
+                    daemon._request_moonlight_serverinfo(
+                        host="192.168.50.20",
+                        port=47984,
+                        host_authority="192.168.50.20",
+                        server_certificate="bad-cert",
+                        client_credentials=("cert", "key"),
+                    )
+
+            with self.assertRaisesRegex(RuntimeValidationError, "client credentials are missing"):
+                daemon._request_moonlight_serverinfo(
+                    host="192.168.50.20",
+                    port=47984,
+                    host_authority="192.168.50.20",
+                    server_certificate="server-cert",
+                    client_credentials=None,
+                )
+
+    def test_moonlight_serverinfo_parser_validation_and_https_port_defaults(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            state_dir = Path(temp_dir) / "moonlight-state"
+            config = build_config(Path(temp_dir), backend="moonlight", moonlight_state_dir=state_dir)
+            daemon = DisplayDaemon(config=config, proxmox=FakeProxmoxClient(["running"]))
+            daemon.prepare_runtime()
+
+            with self.assertRaisesRegex(RuntimeValidationError, "invalid XML"):
+                daemon._parse_moonlight_serverinfo_fields("<root", host_authority="host", port=1, scheme="http")
+            with self.assertRaisesRegex(RuntimeValidationError, "unexpected XML root"):
+                daemon._parse_moonlight_serverinfo_fields("<sunshine />", host_authority="host", port=1, scheme="http")
+            with self.assertRaisesRegex(RuntimeValidationError, "non-numeric status"):
+                daemon._parse_moonlight_serverinfo_fields(
+                    '<root status_code="ok" />',
+                    host_authority="host",
+                    port=1,
+                    scheme="http",
+                )
+            with self.assertRaisesRegex(MoonlightServerInfoAuthError, "unpaired"):
+                daemon._parse_moonlight_serverinfo_fields(
+                    '<root status_code="401" />',
+                    host_authority="host",
+                    port=1,
+                    scheme="https",
+                )
+            with self.assertRaisesRegex(RuntimeValidationError, "status_code=503"):
+                daemon._parse_moonlight_serverinfo_fields(
+                    '<root status_code="503" status_message="busy" />',
+                    host_authority="host",
+                    port=1,
+                    scheme="http",
+                )
+
+            self.assertEqual(
+                daemon._parse_moonlight_serverinfo_fields(
+                    '<root status_code="200"><HttpsPort>0</HttpsPort><PairStatus>1</PairStatus></root>',
+                    host_authority="host",
+                    port=1,
+                    scheme="http",
+                ),
+                {"HttpsPort": "0", "PairStatus": "1"},
+            )
+            self.assertEqual(daemon._moonlight_https_port_from_serverinfo({}), 47984)
+            self.assertEqual(daemon._moonlight_https_port_from_serverinfo({"HttpsPort": "0"}), 47984)
+            with self.assertRaisesRegex(RuntimeValidationError, "invalid HttpsPort"):
+                daemon._moonlight_https_port_from_serverinfo({"HttpsPort": "bad"})
+
+    def test_moonlight_workspace_helpers_decode_match_and_rewrite_records(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            state_dir = Path(temp_dir) / "moonlight-state"
+            config = build_config(
+                Path(temp_dir),
+                backend="moonlight",
+                moonlight_host="[2001:db8::99]",
+                moonlight_base_port=48000,
+                moonlight_state_dir=state_dir,
+            )
+            daemon = DisplayDaemon(config=config, proxmox=FakeProxmoxClient(["running"]))
+            daemon.prepare_runtime()
+            settings_path = state_dir / "Moonlight.ini"
+            settings_path.write_text(
+                "\n".join(
+                    [
+                        "[General]",
+                        "certificate=@ByteArray(cert\\rcert)",
+                        "key=@ByteArray(key\\tkey)",
+                        "bad-root-line",
+                        "",
+                        "[hosts]",
+                        "size=2",
+                        "1\\hostname=old-host",
+                        "1\\localaddress=old-address",
+                        "1\\localport=47989",
+                        "1\\srvcert=@ByteArray(dummy-cert)",
+                        "2\\hostname=unused-host",
+                        "2\\srvcert=",
+                        "not-a-key",
+                        "[ignored]",
+                        "1\\hostname=ignored-host",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            (state_dir / "skip.ini").mkdir()
+
+            self.assertEqual(daemon._decode_moonlight_qsettings_bytearray('"@ByteArray(line\\ncarriage\\rtab\\tbackslash\\\\hex\\x41tail\\q)"'), "line\ncarriage\rtab\tbackslash\\hexAtailq")
+            self.assertEqual(daemon._decode_moonlight_qsettings_bytearray(r"@ByteArray(trailing\\)"), "trailing\\")
+            self.assertTrue(
+                daemon._moonlight_workspace_record_matches_host(
+                    {"manualaddress": "[2001:db8::99]", "manualport": "48000"},
+                    "2001:db8::99",
+                    48000,
+                )
+            )
+            self.assertTrue(
+                daemon._moonlight_workspace_record_matches_host(
+                    {"localaddress": "2001:db8::99"},
+                    "2001:db8::99",
+                    48000,
+                )
+            )
+            self.assertFalse(
+                daemon._moonlight_workspace_record_matches_host(
+                    {"manualaddress": "2001:db8::99", "manualport": "bad"},
+                    "2001:db8::99",
+                    48000,
+                )
+            )
+            self.assertFalse(
+                daemon._moonlight_workspace_record_matches_host(
+                    {"manualaddress": "192.168.50.20", "manualport": "48000"},
+                    "2001:db8::99",
+                    48000,
+                )
+            )
+
+            self.assertEqual(daemon._moonlight_workspace_client_credentials(), ("cert\rcert", "key\tkey"))
+            self.assertEqual(
+                daemon._moonlight_workspace_server_certificate("192.168.50.20", allow_any_paired_host=True),
+                "dummy-cert",
+            )
+            daemon._normalize_moonlight_workspace_host()
+            rewritten = settings_path.read_text(encoding="utf-8")
+
+        self.assertIn("1\\hostname=2001:db8::99", rewritten)
+        self.assertIn("1\\manualaddress=2001:db8::99", rewritten)
+        self.assertIn("1\\manualport=48000", rewritten)
+        self.assertIn("1\\localaddress=", rewritten)
+        self.assertIn("1\\localport=", rewritten)
 
     def test_moonlight_workspace_certificate_alone_does_not_skip_pairing(self) -> None:
         with TemporaryDirectory() as temp_dir:
