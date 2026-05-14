@@ -1059,6 +1059,134 @@ class DisplayDaemonTests(unittest.TestCase):
                 __import__("runpy").run_module("relayinner_display.daemon", run_name="__main__")
         self.assertEqual(raised.exception.code, 2)
 
+    def test_remaining_daemon_defensive_branches(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            timestamp = datetime(2026, 4, 4, tzinfo=timezone.utc)
+
+            input_config = build_config(Path(temp_dir) / "input", forward_power_button=True)
+            input_daemon = DisplayDaemon(config=input_config, proxmox=FakeProxmoxClient(["stopped"]))
+            self.assertEqual(input_daemon._poll_power_button_source(timestamp), [])
+            input_daemon.power_button_source = FakePowerButtonSource([1])
+            input_daemon.startup_error = "preflight failed"
+            self.assertEqual(input_daemon._poll_power_button_source(timestamp), [])
+
+            moonlight_state_dir = Path(temp_dir) / "moonlight-state"
+            moonlight_config = build_config(
+                Path(temp_dir) / "moonlight",
+                backend="moonlight",
+                moonlight_state_dir=moonlight_state_dir,
+            )
+            moonlight_daemon = DisplayDaemon(config=moonlight_config, proxmox=FakeProxmoxClient(["stopped"]))
+            moonlight_state_dir.mkdir(parents=True)
+            (moonlight_state_dir / "Moonlight.ini").write_text(
+                "[hosts]\nsize=1\n1\\hostname=192.168.50.20\n1\\manualaddress=192.168.50.20\n"
+                "1\\manualport=47989\n1\\srvcert=@ByteArray()\n",
+                encoding="utf-8",
+            )
+            self.assertIsNone(
+                moonlight_daemon._moonlight_workspace_server_certificate(
+                    "192.168.50.20",
+                    allow_any_paired_host=True,
+                )
+            )
+
+            class FakeSslContext:
+                check_hostname = True
+
+                def load_cert_chain(self, *, certfile: str, keyfile: str) -> None:
+                    raise __import__("ssl").SSLError("bad certificate")
+
+            created_temp_files: list[object] = []
+
+            def fake_named_temporary_file(*args: object, **kwargs: object) -> object:
+                path = Path(temp_dir) / f"moonlight-temp-{len(created_temp_files)}.pem"
+                handle = path.open("w", encoding="utf-8")
+                created_temp_files.append(handle)
+                return handle
+
+            with patch(
+                "relayinner_display.daemon.ssl.create_default_context",
+                return_value=FakeSslContext(),
+            ), patch(
+                "relayinner_display.daemon.tempfile.NamedTemporaryFile",
+                side_effect=fake_named_temporary_file,
+            ), patch("relayinner_display.daemon.Path.unlink", side_effect=OSError("unlink failed")):
+                with self.assertRaisesRegex(RuntimeValidationError, "HTTPS probe failed"):
+                    moonlight_daemon._request_moonlight_serverinfo(
+                        host="192.168.50.20",
+                        port=47984,
+                        host_authority="192.168.50.20",
+                        server_certificate="server-cert",
+                        client_credentials=("client-cert", "client-key"),
+                    )
+
+            duplicate_binary_config = build_config(Path(temp_dir) / "deps", power_helper="remote-viewer")
+            duplicate_binary_daemon = DisplayDaemon(
+                config=duplicate_binary_config,
+                proxmox=FakeProxmoxClient(["stopped"]),
+            )
+            checked_binaries: list[str] = []
+            duplicate_binary_daemon._ensure_binary_available = checked_binaries.append  # type: ignore[method-assign]
+            duplicate_binary_daemon._validate_runtime_dependencies()
+            self.assertEqual(checked_binaries, ["remote-viewer"])
+
+            looking_glass_config = build_config(Path(temp_dir) / "startup-lg", backend="looking-glass")
+            looking_glass_daemon = DisplayDaemon(
+                config=looking_glass_config,
+                proxmox=FakeProxmoxClient(["stopped"]),
+            )
+            looking_glass_daemon._validate_looking_glass_preflight = lambda **kwargs: None  # type: ignore[method-assign]
+            object.__setattr__(looking_glass_config.console, "looking_glass", None)
+            with self.assertRaisesRegex(AssertionError, "Looking Glass backend selected"):
+                looking_glass_daemon._validate_console_startup_prerequisites()
+            with self.assertRaisesRegex(AssertionError, "Looking Glass backend selected"):
+                looking_glass_daemon._configured_console_launcher()
+
+            moonlight_startup_config = build_config(Path(temp_dir) / "startup-moonlight", backend="moonlight")
+            moonlight_startup_daemon = DisplayDaemon(
+                config=moonlight_startup_config,
+                proxmox=FakeProxmoxClient(["stopped"]),
+            )
+            moonlight_startup_daemon._validate_moonlight_startup_prerequisites = lambda **kwargs: None  # type: ignore[method-assign]
+            object.__setattr__(moonlight_startup_config.console, "moonlight", None)
+            with self.assertRaisesRegex(AssertionError, "Moonlight backend selected"):
+                moonlight_startup_daemon._validate_console_startup_prerequisites()
+            with self.assertRaisesRegex(AssertionError, "Moonlight backend selected"):
+                moonlight_startup_daemon._configured_console_launcher()
+
+            access_config = build_config(Path(temp_dir) / "access")
+            access_daemon = DisplayDaemon(config=access_config, proxmox=FakeProxmoxClient(["stopped"]))
+            candidate = Path(temp_dir) / "access-check"
+            with patch("relayinner_display.daemon.pwd.getpwnam", side_effect=KeyError):
+                with self.assertRaisesRegex(RuntimeValidationError, "Session user does not exist"):
+                    access_daemon._session_user_can_read_path(candidate)
+
+            with patch(
+                "relayinner_display.daemon.pwd.getpwnam",
+                return_value=SimpleNamespace(pw_name="relayinner-display", pw_uid=111, pw_gid=222),
+            ), patch(
+                "relayinner_display.daemon.Path.stat",
+                return_value=SimpleNamespace(st_uid=111, st_gid=999, st_mode=0o400),
+            ):
+                self.assertTrue(access_daemon._session_user_can_read_path(candidate))
+
+            with patch(
+                "relayinner_display.daemon.pwd.getpwnam",
+                return_value=SimpleNamespace(pw_name="relayinner-display", pw_uid=111, pw_gid=222),
+            ), patch(
+                "relayinner_display.daemon.Path.stat",
+                return_value=SimpleNamespace(st_uid=999, st_gid=333, st_mode=0o040),
+            ), patch.object(access_daemon, "_session_user_group_ids", return_value={222, 333}):
+                self.assertTrue(access_daemon._session_user_can_read_path(candidate))
+
+            display_config = build_config(Path(temp_dir) / "display")
+            display_daemon = DisplayDaemon(config=display_config, proxmox=FakeProxmoxClient(["stopped"]))
+            display_daemon.state.vm_power_state = "stopped"
+            display_daemon._power_state_since_at = timestamp
+            display_daemon._startup_display_policy_pending = True
+            display_daemon.started_at = None
+            self.assertIsNone(display_daemon._desired_display_power_intent(timestamp))
+
     def test_running_vm_connects_and_reconnects_after_viewer_exit(self) -> None:
         with TemporaryDirectory() as temp_dir:
             config = build_config(Path(temp_dir))
