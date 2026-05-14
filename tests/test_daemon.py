@@ -24,7 +24,12 @@ from relayinner_display.config import (
     TargetConfig,
     resolve_kiosk_compositor,
 )
-from relayinner_display.daemon import DisplayDaemon
+from relayinner_display.daemon import (
+    DisplayDaemon,
+    SessionSocketServer,
+    generate_moonlight_pin,
+    parse_moonlight_app_list_csv,
+)
 from relayinner_display.input import PowerButtonError
 from relayinner_display.models import MoonlightPairState, SessionState
 from relayinner_display.proxmox import (
@@ -155,6 +160,64 @@ class RejectingPolicyChecker:
         raise PowerButtonError("Host power-button handling is not disabled")
 
 
+class FakeDaemonConnection:
+    def __init__(self, chunks: list[bytes | Exception] | None = None) -> None:
+        self.chunks = chunks or []
+        self.sent: list[bytes] = []
+        self.blocking: bool | None = None
+        self.closed = False
+        self.send_error: OSError | None = None
+
+    def setblocking(self, blocking: bool) -> None:
+        self.blocking = blocking
+
+    def recv(self, size: int) -> bytes:
+        self.last_recv_size = size
+        if not self.chunks:
+            raise BlockingIOError()
+        chunk = self.chunks.pop(0)
+        if isinstance(chunk, Exception):
+            raise chunk
+        return chunk
+
+    def sendall(self, payload: bytes) -> None:
+        if self.send_error is not None:
+            raise self.send_error
+        self.sent.append(payload)
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class FakeDaemonServerSocket:
+    def __init__(self, connection: FakeDaemonConnection | None = None) -> None:
+        self.connection = connection
+        self.bound_path: str | None = None
+        self.listen_backlog: int | None = None
+        self.blocking: bool | None = None
+        self.closed = False
+
+    def bind(self, path: str) -> None:
+        self.bound_path = path
+        Path(path).write_text("socket", encoding="utf-8")
+
+    def listen(self, backlog: int) -> None:
+        self.listen_backlog = backlog
+
+    def setblocking(self, blocking: bool) -> None:
+        self.blocking = blocking
+
+    def accept(self) -> tuple[FakeDaemonConnection, object]:
+        if self.connection is None:
+            raise BlockingIOError()
+        connection = self.connection
+        self.connection = None
+        return connection, object()
+
+    def close(self) -> None:
+        self.closed = True
+
+
 def moonlight_app_list_csv(*apps: str) -> str:
     rows = ["Name, ID, HDR Support, App Collection Game, Hidden, Direct Launch, Boxart URL\n"]
     for index, app in enumerate(apps, start=1):
@@ -205,6 +268,93 @@ def write_moonlight_host_settings(
     state_dir.mkdir(parents=True, exist_ok=True)
     settings_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return settings_path
+
+
+class DaemonHelperTests(unittest.TestCase):
+    def test_generate_moonlight_pin_is_zero_padded(self) -> None:
+        with patch(
+            "relayinner_display.daemon.random.SystemRandom",
+            return_value=SimpleNamespace(randrange=lambda upper: 7),
+        ):
+            self.assertEqual(generate_moonlight_pin(), "0007")
+
+    def test_parse_moonlight_app_list_csv_handles_empty_headers_and_short_rows(self) -> None:
+        self.assertEqual(parse_moonlight_app_list_csv("\n,\n"), [])
+        self.assertEqual(
+            parse_moonlight_app_list_csv("ID,Name\n1\n2,Steam Big Picture\n3,   \n"),
+            ["Steam Big Picture"],
+        )
+        self.assertEqual(
+            parse_moonlight_app_list_csv('Name,ID\n"Desktop",1\n"Game, With Comma",2\n'),
+            ["Desktop", "Game, With Comma"],
+        )
+
+    def test_session_socket_server_accepts_reads_sends_and_closes(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            socket_path = Path(temp_dir) / "daemon.sock"
+            socket_path.write_text("stale", encoding="utf-8")
+            connection = FakeDaemonConnection(
+                [
+                    b"\n",
+                    b'{"type":"session_ready"}\n{"type":"session_error","reason":"x"}\npartial',
+                    BlockingIOError(),
+                ]
+            )
+            fake_server = FakeDaemonServerSocket(connection)
+            with patch("relayinner_display.daemon.socket.socket", return_value=fake_server), patch(
+                "relayinner_display.daemon.chown_if_present",
+                lambda *args: None,
+            ):
+                server = SessionSocketServer(socket_path)
+                self.assertFalse(server.accept_pending())
+                server.start()
+                self.assertEqual(fake_server.bound_path, str(socket_path))
+                self.assertEqual(fake_server.listen_backlog, 1)
+                self.assertFalse(fake_server.blocking)
+
+                self.assertTrue(server.accept_pending())
+                self.assertFalse(connection.blocking)
+                self.assertFalse(server.accept_pending())
+
+                messages, disconnected = server.read_messages()
+                self.assertFalse(disconnected)
+                self.assertEqual(
+                    messages,
+                    [
+                        {"type": "session_ready"},
+                        {"type": "session_error", "reason": "x"},
+                    ],
+                )
+                self.assertEqual(server.buffer, b"partial")
+
+                self.assertTrue(server.send_message({"type": "show_waiting", "reason": "vm_stopped"}))
+                self.assertEqual(connection.sent[-1], b'{"reason":"vm_stopped","type":"show_waiting"}\n')
+
+                server.close()
+                self.assertTrue(connection.closed)
+                self.assertTrue(fake_server.closed)
+                self.assertFalse(socket_path.exists())
+
+    def test_session_socket_server_disconnects_on_recv_and_send_errors(self) -> None:
+        server = SessionSocketServer(Path("/tmp/daemon.sock"))
+        recv_connection = FakeDaemonConnection([OSError("reset")])
+        server.connection = recv_connection
+
+        messages, disconnected = server.read_messages()
+
+        self.assertEqual(messages, [])
+        self.assertTrue(disconnected)
+        self.assertTrue(recv_connection.closed)
+        self.assertIsNone(server.connection)
+        self.assertEqual(server.buffer, b"")
+
+        send_connection = FakeDaemonConnection()
+        send_connection.send_error = OSError("broken pipe")
+        server.connection = send_connection
+
+        self.assertFalse(server.send_message({"type": "show_waiting", "reason": "degraded"}))
+        self.assertTrue(send_connection.closed)
+        self.assertIsNone(server.connection)
 
 
 class DisplayDaemonTests(unittest.TestCase):
