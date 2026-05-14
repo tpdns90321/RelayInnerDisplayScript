@@ -1,0 +1,17 @@
+{
+  "defaultLimit": 50,
+  "maxLimit": 200,
+  "servers": [
+    {
+      "id": "py",
+      "name": "Pyright",
+      "languages": ["python"],
+      "fileGlobs": ["**/*.py"],
+      "rootMarkers": ["pyproject.toml", ".git"],
+      "command": {
+        "command": "pyright-langserver",
+        "args": ["--stdio"]
+      }
+    }
+  ]
+}
