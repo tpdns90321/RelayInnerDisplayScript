@@ -49,16 +49,17 @@ Validate the checked-in policy from the repository root with strict confirmation
 
 ## Optional coverage non-regression gate
 
-Spec 73 enables the managed coverage gate for active TDD cycles. The selected tool is Python `coverage.py`, exposed as the optional project dependency group `tdd`:
+Spec 73 enables the managed coverage gate for active TDD cycles. The selected tool is Python `coverage.py`, exposed as the optional project dependency group `tdd`. The policy calls the standalone `coverage` executable, so ensure that executable is on `PATH` before running managed coverage checks:
 
 ```sh
 python -m pip install '.[tdd]'
+coverage --version
 ```
 
 The configured coverage command is:
 
 ```sh
-mkdir -p coverage && python -m coverage run --data-file=coverage/.coverage -m unittest discover -s tests -p 'test_*.py' && python -m coverage json --data-file=coverage/.coverage -o coverage/coverage-summary.json
+mkdir -p coverage && coverage run --data-file=coverage/.coverage --source=relayinner_display -m unittest discover -s tests -p 'test_*.py' && coverage json --data-file=coverage/.coverage -o coverage/coverage-summary.json
 ```
 
 The configured summary file is `coverage/coverage-summary.json`, the enforced metric is `totals.percent_covered`, and coverage outputs are limited to `coverage/**`.

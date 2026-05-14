@@ -8,7 +8,7 @@
   "refactorAllowedTestFiles": [],
   "coverage": {
     "enabled": true,
-    "command": "mkdir -p coverage && python -m coverage run --data-file=coverage/.coverage -m unittest discover -s tests -p 'test_*.py' && python -m coverage json --data-file=coverage/.coverage -o coverage/coverage-summary.json",
+    "command": "mkdir -p coverage && coverage run --data-file=coverage/.coverage --source=relayinner_display -m unittest discover -s tests -p 'test_*.py' && coverage json --data-file=coverage/.coverage -o coverage/coverage-summary.json",
     "summaryFile": "coverage/coverage-summary.json",
     "metrics": [
       "totals.percent_covered"
