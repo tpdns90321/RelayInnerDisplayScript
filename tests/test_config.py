@@ -479,13 +479,19 @@ class ConfigTests(unittest.TestCase):
 
             [console.vnc]
             display_number = 77
+
+            [policy]
+            poll_interval_ms = 2000
+            reconnect_initial_ms = 1000
+            reconnect_max_ms = 15000
+            command_timeout_s = 10
             """
         )
         with TemporaryDirectory() as temp_dir:
             config_path = Path(temp_dir) / "config.toml"
             config_path.write_text(content, encoding="utf-8")
 
-            with self.assertRaises(ConfigError):
+            with self.assertRaisesRegex(ConfigError, "runtime.spice_vv_path is only supported"):
                 load_config(config_path)
 
     def test_backend_specific_mismatch_rejected(self) -> None:
