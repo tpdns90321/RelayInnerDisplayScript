@@ -356,8 +356,94 @@ class DaemonHelperTests(unittest.TestCase):
         self.assertTrue(send_connection.closed)
         self.assertIsNone(server.connection)
 
+    def test_session_socket_server_noops_without_pending_or_active_client(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            socket_path = Path(temp_dir) / "daemon.sock"
+            fake_server = FakeDaemonServerSocket(connection=None)
+            with patch("relayinner_display.daemon.socket.socket", return_value=fake_server), patch(
+                "relayinner_display.daemon.chown_if_present",
+                lambda *args: None,
+            ):
+                server = SessionSocketServer(socket_path)
+                server.start()
+
+                self.assertFalse(server.accept_pending())
+                self.assertEqual(server.read_messages(), ([], False))
+                self.assertFalse(server.send_message({"type": "show_waiting", "reason": "degraded"}))
+
+                server.close()
+
 
 class DisplayDaemonTests(unittest.TestCase):
+    def test_start_with_startup_error_enters_degraded(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            config = build_config(Path(temp_dir))
+            daemon = DisplayDaemon(
+                config=config,
+                proxmox=FakeProxmoxClient(["running"]),
+                startup_error="preflight failed",
+            )
+            start_time = datetime(2026, 4, 4, 0, 0, tzinfo=timezone.utc)
+
+            daemon.prepare_runtime()
+            daemon.start(now=start_time)
+
+        self.assertEqual(daemon.started_at, start_time)
+        self.assertEqual(daemon.state.session_state, SessionState.DEGRADED)
+        self.assertEqual(daemon.state.degraded_reason, "preflight failed")
+
+    def test_session_ready_and_disconnect_preserve_degraded_state(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            config = build_config(Path(temp_dir))
+            daemon = DisplayDaemon(
+                config=config,
+                proxmox=FakeProxmoxClient(["running"]),
+                startup_error="preflight failed",
+            )
+            start_time = datetime(2026, 4, 4, 0, 0, tzinfo=timezone.utc)
+
+            daemon.prepare_runtime()
+            daemon.start(now=start_time)
+            ready_actions = daemon.handle_session_message({"type": "session_ready"}, now=start_time)
+            daemon.console_running = True
+            daemon.console_pid = 123
+            daemon.state.active_console_backend = "spice"
+            daemon.moonlight_pair_launch_pending = True
+            daemon.on_session_disconnected()
+
+        self.assertEqual(ready_actions, [{"type": "show_waiting", "reason": "degraded"}])
+        self.assertFalse(daemon.session_ready)
+        self.assertFalse(daemon.console_running)
+        self.assertIsNone(daemon.console_pid)
+        self.assertIsNone(daemon.state.active_console_backend)
+        self.assertFalse(daemon.moonlight_pair_launch_pending)
+        self.assertEqual(daemon.state.session_state, SessionState.DEGRADED)
+
+    def test_session_error_enters_degraded_and_unhandled_payload_raises(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            config = build_config(Path(temp_dir))
+            daemon = DisplayDaemon(config=config, proxmox=FakeProxmoxClient(["running"]))
+            start_time = datetime(2026, 4, 4, 0, 0, tzinfo=timezone.utc)
+
+            daemon.prepare_runtime()
+            daemon.start(now=start_time)
+            daemon.console_running = True
+            daemon.console_pid = 123
+            actions = daemon.handle_session_message(
+                {"type": "session_error", "reason": "viewer crashed"},
+                now=start_time,
+            )
+
+            with patch("relayinner_display.daemon.validate_session_message", return_value={"type": "future"}):
+                with self.assertRaisesRegex(AssertionError, "Unhandled session message type"):
+                    daemon.handle_session_message({"type": "future"}, now=start_time)
+
+        self.assertEqual(actions, [{"type": "show_waiting", "reason": "degraded"}])
+        self.assertFalse(daemon.console_running)
+        self.assertIsNone(daemon.console_pid)
+        self.assertEqual(daemon.state.session_state, SessionState.DEGRADED)
+        self.assertEqual(daemon.state.degraded_reason, "viewer crashed")
+
     def test_running_vm_connects_and_reconnects_after_viewer_exit(self) -> None:
         with TemporaryDirectory() as temp_dir:
             config = build_config(Path(temp_dir))
