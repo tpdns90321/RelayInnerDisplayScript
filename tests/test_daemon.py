@@ -11,6 +11,7 @@ from unittest.mock import patch
 
 from relayinner_display.config import (
     AppConfig,
+    ConfigError,
     ConsoleConfig,
     ConsoleLookingGlassConfig,
     ConsoleMoonlightConfig,
@@ -3201,6 +3202,161 @@ class DisplayDaemonTests(unittest.TestCase):
 
         self.assertEqual(payload["console_backend"], "spice")
         self.assertEqual(payload["display_drm_compatibility"], "legacy-drm")
+
+    def test_run_dispatches_session_messages_ticks_and_cleans_up(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            config = build_config(Path(temp_dir))
+            daemon_instances: list[object] = []
+            socket_instances: list[object] = []
+
+            class FakeRunDaemon:
+                def __init__(self, **kwargs: object) -> None:
+                    self.kwargs = kwargs
+                    self.prepare_runtime_called = False
+                    self.started = False
+                    self.disconnected = False
+                    self.closed = False
+                    daemon_instances.append(self)
+
+                def prepare_runtime(self) -> None:
+                    self.prepare_runtime_called = True
+
+                def start(self) -> None:
+                    self.started = True
+
+                def on_session_disconnected(self) -> None:
+                    self.disconnected = True
+
+                def handle_session_message(self, message: dict[str, object]) -> list[dict[str, object]]:
+                    return [{"type": "handled", "source": message["type"]}]
+
+                def tick(self) -> list[dict[str, object]]:
+                    return [{"type": "tick"}]
+
+                def close(self) -> None:
+                    self.closed = True
+
+            class FakeRunSocketServer:
+                def __init__(self, path: Path, logger: object) -> None:
+                    self.path = path
+                    self.logger = logger
+                    self.started = False
+                    self.closed = False
+                    self.sent: list[dict[str, object]] = []
+                    socket_instances.append(self)
+
+                def start(self) -> None:
+                    self.started = True
+
+                def accept_pending(self) -> None:
+                    pass
+
+                def read_messages(self) -> tuple[list[dict[str, object]], bool]:
+                    return [{"type": "session_ready"}], True
+
+                def send_message(self, message: dict[str, object]) -> bool:
+                    self.sent.append(message)
+                    return True
+
+                def close(self) -> None:
+                    self.closed = True
+
+            with patch("relayinner_display.daemon.load_config", return_value=config), patch(
+                "relayinner_display.daemon.DisplayDaemon",
+                FakeRunDaemon,
+            ), patch("relayinner_display.daemon.SessionSocketServer", FakeRunSocketServer), patch(
+                "relayinner_display.daemon.time.sleep",
+                side_effect=KeyboardInterrupt,
+            ):
+                with self.assertRaises(KeyboardInterrupt):
+                    __import__("relayinner_display.daemon").daemon.run(Path("config.toml"))
+
+        daemon = daemon_instances[0]
+        socket_server = socket_instances[0]
+        self.assertTrue(daemon.prepare_runtime_called)
+        self.assertTrue(daemon.started)
+        self.assertTrue(daemon.disconnected)
+        self.assertTrue(daemon.closed)
+        self.assertTrue(socket_server.started)
+        self.assertTrue(socket_server.closed)
+        self.assertEqual(
+            socket_server.sent,
+            [{"type": "handled", "source": "session_ready"}, {"type": "tick"}],
+        )
+
+    def test_run_uses_fallback_config_and_retries_after_send_failure(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            fallback_config = build_config(Path(temp_dir))
+            daemon_instances: list[object] = []
+            socket_instances: list[object] = []
+
+            class FakeRunDaemon:
+                def __init__(self, **kwargs: object) -> None:
+                    self.kwargs = kwargs
+                    self.disconnects = 0
+                    self.closed = False
+                    daemon_instances.append(self)
+
+                def prepare_runtime(self) -> None:
+                    pass
+
+                def start(self) -> None:
+                    pass
+
+                def on_session_disconnected(self) -> None:
+                    self.disconnects += 1
+
+                def handle_session_message(self, message: dict[str, object]) -> list[dict[str, object]]:
+                    return [{"type": "handled"}]
+
+                def tick(self) -> list[dict[str, object]]:
+                    raise AssertionError("tick should be skipped after send failure")
+
+                def close(self) -> None:
+                    self.closed = True
+
+            class FakeRunSocketServer:
+                def __init__(self, path: Path, logger: object) -> None:
+                    self.closed = False
+                    socket_instances.append(self)
+
+                def start(self) -> None:
+                    pass
+
+                def accept_pending(self) -> None:
+                    pass
+
+                def read_messages(self) -> tuple[list[dict[str, object]], bool]:
+                    return [{"type": "session_ready"}], False
+
+                def send_message(self, message: dict[str, object]) -> bool:
+                    return False
+
+                def close(self) -> None:
+                    self.closed = True
+
+            with patch("relayinner_display.daemon.load_config", side_effect=ConfigError("bad config")), patch(
+                "relayinner_display.daemon.build_fallback_config",
+                return_value=fallback_config,
+            ), patch("relayinner_display.daemon.DisplayDaemon", FakeRunDaemon), patch(
+                "relayinner_display.daemon.SessionSocketServer",
+                FakeRunSocketServer,
+            ), patch("relayinner_display.daemon.time.sleep", side_effect=KeyboardInterrupt):
+                with self.assertRaises(KeyboardInterrupt):
+                    __import__("relayinner_display.daemon").daemon.run(Path("bad.toml"))
+
+        daemon = daemon_instances[0]
+        self.assertEqual(daemon.kwargs["startup_error"], "Invalid config: bad config")
+        self.assertEqual(daemon.disconnects, 1)
+        self.assertTrue(daemon.closed)
+        self.assertTrue(socket_instances[0].closed)
+
+    def test_main_parses_config_argument_and_delegates_to_run(self) -> None:
+        with patch("relayinner_display.daemon.run", return_value=23) as run_mock:
+            result = __import__("relayinner_display.daemon").daemon.main(["--config", "/tmp/custom.toml"])
+
+        self.assertEqual(result, 23)
+        run_mock.assert_called_once_with(Path("/tmp/custom.toml"))
 
 
 def build_config(
