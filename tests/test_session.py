@@ -1306,6 +1306,49 @@ class SessionRuntimeTests(unittest.TestCase):
         self.assertEqual(observed_paths, ["/run/relayinner-display/session.sock"])
         self.assertEqual(sleep_delays, [2.0])
 
+    def test_run_continues_after_control_socket_connection_retry_delay(self) -> None:
+        class StopLoop(Exception):
+            pass
+
+        observed_paths: list[str] = []
+        sleep_delays: list[float] = []
+
+        class FailingSocket:
+            def connect(self, path: str) -> None:
+                observed_paths.append(path)
+                raise OSError("daemon unavailable")
+
+            def setblocking(self, blocking: bool) -> None:
+                raise AssertionError("failed connects are not made nonblocking")
+
+        class StopLoopSocket:
+            def connect(self, path: str) -> None:
+                observed_paths.append(path)
+                raise StopLoop
+
+            def setblocking(self, blocking: bool) -> None:
+                raise AssertionError("stopped before nonblocking setup")
+
+        def fake_sleep(delay: float) -> None:
+            sleep_delays.append(delay)
+
+        with (
+            patch("relayinner_display.session.load_config", return_value=build_config()),
+            patch("relayinner_display.session.socket.socket", side_effect=[FailingSocket(), StopLoopSocket()]),
+            patch("relayinner_display.session.time.sleep", side_effect=fake_sleep),
+            self.assertRaises(StopLoop),
+        ):
+            run(Path("/tmp/relayinner-session.toml"))
+
+        self.assertEqual(
+            observed_paths,
+            [
+                "/run/relayinner-display/session.sock",
+                "/run/relayinner-display/session.sock",
+            ],
+        )
+        self.assertEqual(sleep_delays, [2.0])
+
     def test_run_retries_when_session_ready_send_fails(self) -> None:
         class StopLoop(Exception):
             pass
