@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 from pathlib import Path
+import runpy
 import socket
 import subprocess
+import sys
 import unittest
+import warnings
 from unittest.mock import patch
 
 from relayinner_display.config import (
@@ -1769,6 +1772,36 @@ class SessionCliTests(unittest.TestCase):
 
         self.assertEqual(result, 7)
         run_mock.assert_called_once_with(Path("/tmp/relayinner-session.toml"))
+
+    def test_module_entrypoint_dispatches_to_main(self) -> None:
+        class StopEntrypoint(Exception):
+            pass
+
+        observed_paths: list[str] = []
+
+        class StopOnConnectSocket:
+            def connect(self, path: str) -> None:
+                observed_paths.append(path)
+                raise StopEntrypoint
+
+            def setblocking(self, blocking: bool) -> None:
+                raise AssertionError("stopped before nonblocking setup")
+
+        with (
+            patch("relayinner_display.config.load_config", return_value=build_config()),
+            patch("socket.socket", return_value=StopOnConnectSocket()),
+            patch.object(sys, "argv", ["relayinner-display-session"]),
+            warnings.catch_warnings(),
+            self.assertRaises(StopEntrypoint),
+        ):
+            warnings.filterwarnings(
+                "ignore",
+                message="'relayinner_display.session' found in sys.modules.*",
+                category=RuntimeWarning,
+            )
+            runpy.run_module("relayinner_display.session", run_name="__main__")
+
+        self.assertEqual(observed_paths, ["/run/relayinner-display/session.sock"])
 
 
 def build_config(
