@@ -670,6 +670,126 @@ class DisplayDaemonTests(unittest.TestCase):
         self.assertEqual(daemon.state.last_error, "qm spiceproxy failed")
         self.assertEqual(daemon.proxmox_failure_timestamps, [start_time])
 
+    def test_runtime_dependency_validation_edge_branches(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            binary_path = Path(temp_dir) / "viewer"
+            config = build_config(Path(temp_dir))
+            daemon = DisplayDaemon(config=config, proxmox=FakeProxmoxClient(["stopped"]))
+
+            with self.assertRaisesRegex(RuntimeValidationError, "Missing required binary"):
+                daemon._ensure_binary_available(str(binary_path))
+
+            binary_path.write_text("#!/bin/sh\n", encoding="utf-8")
+            binary_path.chmod(0o644)
+            with self.assertRaisesRegex(RuntimeValidationError, "not executable"):
+                daemon._ensure_binary_available(str(binary_path))
+
+            binary_path.chmod(0o755)
+            daemon._ensure_binary_available(str(binary_path))
+            self.assertEqual(daemon._resolved_binary(str(binary_path)), str(binary_path))
+
+            with patch("relayinner_display.daemon.os.geteuid", return_value=0), patch(
+                "relayinner_display.daemon.pwd.getpwnam",
+                side_effect=KeyError("relayinner-display"),
+            ):
+                with self.assertRaisesRegex(RuntimeValidationError, "Session user does not exist"):
+                    daemon._session_user_command_kwargs()
+                with self.assertRaisesRegex(RuntimeValidationError, "Session user does not exist"):
+                    daemon._moonlight_helper_env()
+
+            with patch(
+                "relayinner_display.daemon.grp.getgrall",
+                return_value=[SimpleNamespace(gr_mem=["relayinner-display"], gr_gid=33)],
+            ):
+                self.assertEqual(daemon._session_user_group_ids("relayinner-display", 22), {22, 33})
+
+    def test_looking_glass_and_moonlight_startup_validation_edges(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            shm_file = Path(temp_dir) / "kvmfr0"
+            shm_file.write_text("shm", encoding="utf-8")
+            looking_glass_config = build_config(
+                Path(temp_dir) / "lg",
+                backend="looking-glass",
+                looking_glass_shm_file=shm_file,
+            )
+            looking_glass_daemon = DisplayDaemon(
+                config=looking_glass_config,
+                proxmox=FakeProxmoxClient(["stopped"]),
+                dependency_finder=lambda name: f"/usr/bin/{name}",
+            )
+            with patch.object(looking_glass_daemon, "_session_user_can_read_path", return_value=True):
+                looking_glass_daemon._validate_looking_glass_preflight(
+                    check_binary=False,
+                    check_session_access=True,
+                )
+
+            directory_shm = Path(temp_dir) / "kvmfr-dir"
+            directory_shm.mkdir()
+            directory_config = build_config(
+                Path(temp_dir) / "lg-dir",
+                backend="looking-glass",
+                looking_glass_shm_file=directory_shm,
+            )
+            directory_daemon = DisplayDaemon(config=directory_config, proxmox=FakeProxmoxClient(["stopped"]))
+            with self.assertRaisesRegex(RuntimeValidationError, "not a file or device"):
+                directory_daemon._validate_looking_glass_preflight(
+                    check_binary=False,
+                    check_session_access=True,
+                )
+
+            with patch.object(looking_glass_daemon, "_session_user_can_read_path", return_value=True), patch(
+                "relayinner_display.daemon.os.open",
+                side_effect=OSError("permission denied"),
+            ):
+                with self.assertRaisesRegex(RuntimeValidationError, "could not be opened"):
+                    looking_glass_daemon._validate_looking_glass_preflight(
+                        check_binary=False,
+                        check_session_access=True,
+                    )
+
+            moonlight_root = Path(temp_dir) / "moonlight"
+            moonlight_state_dir = moonlight_root / "state"
+            missing_state_config = build_config(
+                moonlight_root,
+                backend="moonlight",
+                moonlight_state_dir=moonlight_state_dir,
+            )
+            missing_state_daemon = DisplayDaemon(config=missing_state_config, proxmox=FakeProxmoxClient(["stopped"]))
+            with self.assertRaisesRegex(RuntimeValidationError, "state_dir is not a directory"):
+                missing_state_daemon._validate_moonlight_startup_prerequisites(check_binary=False)
+
+            moonlight_state_dir.mkdir(parents=True)
+            with self.assertRaisesRegex(RuntimeValidationError, "portable marker is missing"):
+                missing_state_daemon._validate_moonlight_startup_prerequisites(check_binary=False)
+
+            missing_state_config.console.moonlight.portable_marker_path.touch()
+
+            timeout_daemon = DisplayDaemon(
+                config=missing_state_config,
+                proxmox=FakeProxmoxClient(["stopped"]),
+                command_runner=lambda *args, **kwargs: (_ for _ in ()).throw(
+                    subprocess.TimeoutExpired(cmd="moonlight", timeout=10)
+                ),
+            )
+            with self.assertRaisesRegex(RuntimeValidationError, "version check timed out"):
+                timeout_daemon._moonlight_version("moonlight")
+
+            oserror_daemon = DisplayDaemon(
+                config=missing_state_config,
+                proxmox=FakeProxmoxClient(["stopped"]),
+                command_runner=lambda *args, **kwargs: (_ for _ in ()).throw(OSError("exec failed")),
+            )
+            with self.assertRaisesRegex(RuntimeValidationError, "Failed to read Moonlight version"):
+                oserror_daemon._moonlight_version("moonlight")
+
+            bad_version_daemon = DisplayDaemon(
+                config=missing_state_config,
+                proxmox=FakeProxmoxClient(["stopped"]),
+                command_runner=lambda *args, **kwargs: SimpleNamespace(returncode=1, stdout="", stderr="bad"),
+            )
+            with self.assertRaisesRegex(RuntimeValidationError, "Unable to determine Moonlight version"):
+                bad_version_daemon._moonlight_version("moonlight")
+
     def test_running_vm_connects_and_reconnects_after_viewer_exit(self) -> None:
         with TemporaryDirectory() as temp_dir:
             config = build_config(Path(temp_dir))
