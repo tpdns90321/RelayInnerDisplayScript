@@ -9,6 +9,7 @@ from unittest.mock import patch
 from relayinner_display.proxmox import (
     CommandResult,
     ProxmoxClient,
+    default_runner,
     ProxmoxCommandError,
     VncConfigurationError,
     VncEndpointUnavailableError,
@@ -16,6 +17,25 @@ from relayinner_display.proxmox import (
 
 
 class ProxmoxTests(unittest.TestCase):
+    def test_default_runner_returns_command_result(self) -> None:
+        completed = type(
+            "Completed",
+            (),
+            {"returncode": 2, "stdout": "out", "stderr": "err"},
+        )()
+
+        with patch("relayinner_display.proxmox.subprocess.run", return_value=completed) as run:
+            result = default_runner(["qm", "status", "101"], timeout_s=7)
+
+        run.assert_called_once_with(
+            ["qm", "status", "101"],
+            capture_output=True,
+            text=True,
+            timeout=7,
+            check=False,
+        )
+        self.assertEqual(result, CommandResult(("qm", "status", "101"), 2, "out", "err"))
+
     def test_auto_node_resolution_prefers_local_hostname(self) -> None:
         def runner(command: list[str], timeout_s: int) -> CommandResult:
             self.assertEqual(timeout_s, 10)
