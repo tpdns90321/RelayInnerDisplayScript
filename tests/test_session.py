@@ -70,6 +70,12 @@ class FakeStubbornProcess(FakeProcess):
         return self.returncode
 
 
+class FakeUnkillableProcess(FakeStubbornProcess):
+    def wait(self, timeout: int) -> int:
+        self.wait_calls += 1
+        raise subprocess.TimeoutExpired(cmd="remote-viewer", timeout=timeout)
+
+
 class FakeSocket:
     def __init__(
         self,
@@ -655,6 +661,41 @@ class SessionSupervisorTests(unittest.TestCase):
 
     def test_show_waiting_kills_console_after_terminate_timeout(self) -> None:
         process = FakeStubbornProcess(pid=105)
+
+        def fake_factory(
+            command: list[str],
+            cwd: str | None = None,
+            env: dict[str, str] | None = None,
+            text: bool = True,
+        ) -> FakeProcess:
+            return process
+
+        supervisor = SessionSupervisor(config=build_config(), process_factory=fake_factory)
+        supervisor.handle_daemon_message(
+            {
+                "type": "connect_console",
+                "backend": "spice",
+                "launcher": "remote-viewer",
+                "argv": [
+                    "remote-viewer",
+                    "--full-screen",
+                    "/run/relayinner-display/console/spice-current.vv",
+                ],
+            }
+        )
+
+        events = supervisor.handle_daemon_message({"type": "show_waiting", "reason": "vm_stopped"})
+
+        self.assertEqual(events, [])
+        self.assertTrue(process.terminated)
+        self.assertTrue(process.killed)
+        self.assertEqual(process.wait_calls, 2)
+        self.assertFalse(supervisor.view_state.console_active)
+        self.assertEqual(supervisor.view_state.status_text, "Waiting for VM")
+        self.assertIsNone(supervisor.poll_console())
+
+    def test_show_waiting_clears_console_when_process_stays_alive_after_kill(self) -> None:
+        process = FakeUnkillableProcess(pid=106)
 
         def fake_factory(
             command: list[str],
