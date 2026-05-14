@@ -132,6 +132,21 @@ class IPCTests(unittest.TestCase):
         with self.assertRaises(IPCError):
             validate_session_message(payload)
 
+    def test_validation_reports_missing_type_and_required_fields(self) -> None:
+        cases = [
+            (validate_session_message, {}, "session message is missing a valid 'type'"),
+            (
+                validate_daemon_message,
+                {"type": "connect_spice"},
+                "Missing required field 'vv_path' for connect_spice",
+            ),
+        ]
+
+        for validator, payload, message in cases:
+            with self.subTest(payload=payload):
+                with self.assertRaisesRegex(IPCError, message):
+                    validator(payload)
+
 
 if __name__ == "__main__":
     unittest.main()
