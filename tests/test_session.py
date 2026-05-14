@@ -834,6 +834,23 @@ class SessionSupervisorTests(unittest.TestCase):
         self.assertEqual(supervisor.view_state.status_text, "Waiting for VM")
         self.assertIsNone(supervisor.poll_console())
 
+    def test_poll_console_suppresses_pending_exit_report_once(self) -> None:
+        process = FakeProcess(pid=107)
+        process.returncode = 0
+        supervisor = SessionSupervisor(config=build_config())
+        supervisor.console_process = process
+        supervisor.active_console_backend = "spice"
+        supervisor._suppress_exit_report = True
+        supervisor._active_console_uses_legacy_events = True
+
+        self.assertIsNone(supervisor.poll_console())
+
+        self.assertFalse(supervisor._suppress_exit_report)
+        self.assertFalse(supervisor._active_console_uses_legacy_events)
+        self.assertIsNone(supervisor.console_process)
+        self.assertIsNone(supervisor.active_console_backend)
+        self.assertEqual(supervisor.view_state.status_text, "Connection lost")
+
     def test_show_waiting_kills_console_after_terminate_timeout(self) -> None:
         process = FakeStubbornProcess(pid=105)
 
