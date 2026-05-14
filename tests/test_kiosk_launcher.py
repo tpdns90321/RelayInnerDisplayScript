@@ -5,8 +5,11 @@ from contextlib import redirect_stderr
 from io import StringIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
+import runpy
+import sys
 import textwrap
 import unittest
+import warnings
 from unittest.mock import patch
 
 from relayinner_display.kiosk_launcher import (
@@ -397,6 +400,32 @@ class KioskLauncherTests(unittest.TestCase):
             "relayinner-display-kiosk: failed to exec cage: not executable",
             stderr.getvalue(),
         )
+
+    def test_module_entrypoint_dispatches_to_main(self) -> None:
+        captured: dict[str, object] = {}
+
+        def fake_exec(program: str, argv: list[str], env: dict[str, str]) -> None:
+            captured["program"] = program
+            captured["argv"] = argv
+
+        with TemporaryDirectory() as temp_dir:
+            config_path = write_config(Path(temp_dir), backend="spice")
+            with (
+                patch("os.execvpe", side_effect=fake_exec),
+                patch.object(sys, "argv", ["relayinner-display-kiosk", "--config", str(config_path)]),
+                warnings.catch_warnings(),
+                self.assertRaises(SystemExit) as raised,
+            ):
+                warnings.filterwarnings(
+                    "ignore",
+                    message="'relayinner_display.kiosk_launcher' found in sys.modules.*",
+                    category=RuntimeWarning,
+                )
+                runpy.run_module("relayinner_display.kiosk_launcher", run_name="__main__")
+
+        self.assertEqual(raised.exception.code, 0)
+        self.assertEqual(captured["program"], "cage")
+        self.assertEqual(captured["argv"], ["cage", "--", "/usr/local/lib/relayinner-display/session-entrypoint"])
 
 
 if __name__ == "__main__":
