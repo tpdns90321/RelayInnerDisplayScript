@@ -659,6 +659,30 @@ class SessionSupervisorTests(unittest.TestCase):
             },
         )
 
+    def test_disconnect_console_clears_waiting_details_and_shows_reason(self) -> None:
+        supervisor = SessionSupervisor(config=build_config(backend="moonlight"))
+        supervisor.handle_daemon_message(
+            {
+                "type": "show_waiting",
+                "reason": "pairing_required",
+                "details": {
+                    "backend": "moonlight",
+                    "host": "192.168.50.20",
+                    "pin": "1234",
+                },
+            }
+        )
+
+        events = supervisor.handle_daemon_message(
+            {"type": "disconnect_console", "reason": "reconnecting"}
+        )
+
+        self.assertEqual(events, [])
+        self.assertEqual(supervisor.view_state.waiting_reason, "reconnecting")
+        self.assertIsNone(supervisor.view_state.details)
+        self.assertFalse(supervisor.view_state.console_active)
+        self.assertEqual(supervisor.view_state.status_text, "Connection lost")
+
     def test_unexpected_exit_reports_console_exited_with_backend(self) -> None:
         process = FakeProcess(pid=100)
 

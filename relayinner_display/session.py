@@ -191,22 +191,17 @@ class SessionSupervisor:
         message_type = payload["type"]
 
         if message_type == "show_waiting":
-            self.view_state.waiting_reason = str(payload["reason"])
-            self.view_state.details = (
+            details = (
                 {str(key): str(value) for key, value in dict(payload["details"]).items()}
                 if "details" in payload
                 else None
             )
-            self._stop_console(report_exit=False)
-            self._refresh_view_state()
+            self._show_waiting_state(reason=str(payload["reason"]), details=details)
             self.session_logger.info("Waiting state set to %s", self.view_state.waiting_reason)
             return []
 
         if message_type == "disconnect_console":
-            self.view_state.waiting_reason = str(payload["reason"])
-            self.view_state.details = None
-            self._stop_console(report_exit=False)
-            self._refresh_view_state()
+            self._show_waiting_state(reason=str(payload["reason"]))
             self.session_logger.info(
                 "Console disconnected because %s",
                 self.view_state.waiting_reason,
@@ -268,6 +263,17 @@ class SessionSupervisor:
         self._send_legacy_console_events = False
         self.console_logger.warning("Console exited unexpectedly: backend=%s event=%s", backend, event)
         return event
+
+    def _show_waiting_state(
+        self,
+        *,
+        reason: str,
+        details: dict[str, str] | None = None,
+    ) -> None:
+        self.view_state.waiting_reason = reason
+        self.view_state.details = details
+        self._stop_console(report_exit=False)
+        self._refresh_view_state()
 
     def _launch_console(
         self,
