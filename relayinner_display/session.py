@@ -516,6 +516,19 @@ def configure_logging(namespace: str) -> logging.Logger:
     return logging.getLogger(namespace)
 
 
+def _send_daemon_message_responses(
+    *,
+    client: SessionSocketClient,
+    supervisor: SessionSupervisor,
+    messages: list[dict[str, Any]],
+) -> bool:
+    for message in messages:
+        for response in supervisor.handle_daemon_message(message):
+            if not client.send_message(response):
+                return False
+    return True
+
+
 def run(config_path: Path) -> int:
     startup_error: str | None = None
     try:
@@ -548,16 +561,11 @@ def run(config_path: Path) -> int:
                 supervisor._stop_console(report_exit=False)
                 break
 
-            send_failed = False
-            for message in messages:
-                for response in supervisor.handle_daemon_message(message):
-                    if not client.send_message(response):
-                        send_failed = True
-                        break
-                if send_failed:
-                    break
-
-            if send_failed:
+            if not _send_daemon_message_responses(
+                client=client,
+                supervisor=supervisor,
+                messages=messages,
+            ):
                 supervisor._stop_console(report_exit=False)
                 break
 
