@@ -659,6 +659,19 @@ class SessionSupervisorTests(unittest.TestCase):
             },
         )
 
+    def test_health_ping_is_ignored_without_changing_view_state(self) -> None:
+        supervisor = SessionSupervisor(config=build_config())
+        supervisor.view_state.waiting_reason = "reconnecting"
+        supervisor.view_state.status_text = "Connection lost"
+
+        events = supervisor.handle_daemon_message({"type": "health_ping"})
+
+        self.assertEqual(events, [])
+        self.assertEqual(supervisor.view_state.waiting_reason, "reconnecting")
+        self.assertEqual(supervisor.view_state.status_text, "Connection lost")
+        self.assertIsNone(supervisor.view_state.details)
+        self.assertFalse(supervisor.view_state.console_active)
+
     def test_disconnect_console_clears_waiting_details_and_shows_reason(self) -> None:
         supervisor = SessionSupervisor(config=build_config(backend="moonlight"))
         supervisor.handle_daemon_message(
