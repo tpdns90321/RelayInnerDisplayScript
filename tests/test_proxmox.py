@@ -204,6 +204,23 @@ class ProxmoxTests(unittest.TestCase):
         self.assertEqual(endpoint.port, 5977)
         self.assertEqual(endpoint.endpoint, "127.0.0.1:5977")
 
+    def test_read_vnc_endpoint_reports_missing_or_invalid_args(self) -> None:
+        cases: list[tuple[str, type[Exception], str]] = [
+            ("name: win11\n", VncConfigurationError, "does not expose a VNC endpoint"),
+            ("args: -device virtio-balloon\n", VncConfigurationError, "does not expose a VNC endpoint"),
+            ("args: -vnc\n", VncConfigurationError, "missing a VNC endpoint"),
+            ("args: -vnc 'unterminated\n", ProxmoxCommandError, "invalid args for VM 101"),
+        ]
+
+        for stdout, error_type, message in cases:
+            with self.subTest(stdout=stdout):
+                def runner(command: list[str], timeout_s: int, stdout: str = stdout) -> CommandResult:
+                    return CommandResult(args=tuple(command), returncode=0, stdout=stdout, stderr="")
+
+                client = ProxmoxClient(timeout_s=10, runner=runner)
+                with self.assertRaisesRegex(error_type, message):
+                    client.read_vnc_endpoint(101)
+
     def test_validate_vnc_configuration_rejects_non_loopback_bind(self) -> None:
         def runner(command: list[str], timeout_s: int) -> CommandResult:
             return CommandResult(
