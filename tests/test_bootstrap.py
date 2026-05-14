@@ -363,6 +363,27 @@ class BootstrapTests(unittest.TestCase):
         with self.assertRaises(BootstrapError):
             installer.validate_host()
 
+    def test_install_rejects_incomplete_repository_layout(self) -> None:
+        runner = FakeRunner()
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "stage"
+            incomplete_repo = Path(temp_dir) / "repo"
+            incomplete_repo.mkdir()
+            installer = HostBootstrapInstaller(
+                repo_root=incomplete_repo,
+                install_root=root,
+                command_runner=runner,
+                output=lambda _: None,
+                pveversion_finder=lambda _: "/usr/bin/pveversion",
+                systemd_runtime_path=root / "run/systemd/system",
+                service_user_exists_checker=lambda _: True,
+            )
+
+            with self.assertRaisesRegex(BootstrapError, "Repository layout is incomplete"):
+                installer.install(skip_host_validation=True, skip_package_install=True)
+
+            self.assertFalse((root / "etc/relayinner-display/config.toml").exists())
+
     def test_install_validates_host_and_replaces_existing_package_tree(self) -> None:
         repo_root = Path(__file__).resolve().parents[1]
         runner = FakeRunner()
