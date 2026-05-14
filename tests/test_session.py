@@ -1622,6 +1622,78 @@ class SessionRuntimeTests(unittest.TestCase):
         self.assertTrue(connected_socket.closed)
         self.assertEqual(sleep_delays, [2.0])
 
+    def test_run_closes_socket_and_retries_after_exit_event_send_failure(self) -> None:
+        class StopLoop(Exception):
+            pass
+
+        observed_paths: list[str] = []
+        sleep_delays: list[float] = []
+        launched_process = FakeProcess(pid=9010)
+        launched_process.returncode = 1
+
+        class ExitEventSendFailingSocket(FakeSocket):
+            def __init__(self) -> None:
+                super().__init__(
+                    [
+                        b'{"type":"connect_console","backend":"spice",'
+                        b'"launcher":"remote-viewer","argv":["remote-viewer","--full-screen",'
+                        b'"/run/relayinner-display/console/spice-current.vv"]}\n'
+                    ]
+                )
+                self.blocking: bool | None = None
+                self.send_attempts = 0
+
+            def connect(self, path: str) -> None:
+                observed_paths.append(path)
+
+            def setblocking(self, blocking: bool) -> None:
+                self.blocking = blocking
+
+            def sendall(self, payload: bytes) -> None:
+                self.sent.append(payload)
+                self.send_attempts += 1
+                if self.send_attempts == 3:
+                    raise BrokenPipeError("daemon closed")
+
+        def fake_process_factory(
+            command: list[str],
+            cwd: str | None = None,
+            env: dict[str, str] | None = None,
+            text: bool = True,
+        ) -> FakeProcess:
+            return launched_process
+
+        def supervisor_factory(config: AppConfig, logger: object) -> SessionSupervisor:
+            return SessionSupervisor(config=config, logger=logger, process_factory=fake_process_factory)
+
+        connected_socket = ExitEventSendFailingSocket()
+
+        def stop_after_exit_event_send_failure(delay: float) -> None:
+            sleep_delays.append(delay)
+            raise StopLoop
+
+        with (
+            patch("relayinner_display.session.load_config", return_value=build_config()),
+            patch("relayinner_display.session.SessionSupervisor", side_effect=supervisor_factory),
+            patch("relayinner_display.session.socket.socket", return_value=connected_socket),
+            patch("relayinner_display.session.time.sleep", side_effect=stop_after_exit_event_send_failure),
+            self.assertRaises(StopLoop),
+        ):
+            run(Path("/tmp/relayinner-session.toml"))
+
+        self.assertEqual(observed_paths, ["/run/relayinner-display/session.sock"])
+        self.assertFalse(connected_socket.blocking)
+        self.assertEqual(
+            connected_socket.sent,
+            [
+                b'{"type":"session_ready"}\n',
+                b'{"backend":"spice","pid":9010,"type":"console_started"}\n',
+                b'{"backend":"spice","code":1,"signal":0,"type":"console_exited"}\n',
+            ],
+        )
+        self.assertTrue(connected_socket.closed)
+        self.assertEqual(sleep_delays, [2.0])
+
     def test_run_closes_socket_and_retries_after_daemon_disconnect(self) -> None:
         class StopLoop(Exception):
             pass
