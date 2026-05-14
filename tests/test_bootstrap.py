@@ -3,6 +3,8 @@ from __future__ import annotations
 from datetime import datetime, timezone
 import json
 import os
+import runpy
+import sys
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import subprocess
@@ -30,6 +32,7 @@ from relayinner_display.bootstrap import (
     render_kiosk_service,
     render_seatd_service,
     render_logind_override,
+    main,
     render_sample_config,
     resolve_host_binary,
 )
@@ -827,6 +830,126 @@ class BootstrapTests(unittest.TestCase):
                     installer.install_packages(skip_package_install=False)
 
                 self.assertIn(expected_install, runner.commands)
+
+    def test_private_bootstrap_boundaries_report_errors(self) -> None:
+        runner = FakeRunner()
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            installer = self.make_installer(
+                root=root,
+                runner=runner,
+                output=lambda _: None,
+                service_user_exists=True,
+            )
+            with patch("relayinner_display.bootstrap.pwd.getpwnam", side_effect=[object(), KeyError("missing")]):
+                self.assertTrue(installer._lookup_service_user(SERVICE_USER))
+                self.assertFalse(installer._lookup_service_user(SERVICE_USER))
+
+            (root / "tmp/file").parent.mkdir(parents=True)
+            (root / "tmp/file").write_text("x", encoding="utf-8")
+            installer._remove_tree(Path("/tmp/file"))
+            self.assertFalse((root / "tmp/file").exists())
+
+            failing = HostBootstrapInstaller(
+                repo_root=Path(__file__).resolve().parents[1],
+                install_root=root,
+                command_runner=lambda command, **_: subprocess.CompletedProcess(command, 7, "", "boom"),
+                output=lambda _: None,
+                pveversion_finder=lambda _: "/usr/bin/pveversion",
+                systemd_runtime_path=root / "run/systemd/system",
+            )
+            with self.assertRaisesRegex(BootstrapError, "boom"):
+                failing._run(["false"])
+
+        root_installer = HostBootstrapInstaller(repo_root=Path(__file__).resolve().parents[1])
+        with patch("relayinner_display.bootstrap.os.geteuid", return_value=1000):
+            with self.assertRaisesRegex(BootstrapError, "run as root"):
+                root_installer._require_root()
+
+        with TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "config.toml"
+            path.write_text("", encoding="utf-8")
+            with patch("relayinner_display.bootstrap.chown", side_effect=PermissionError("denied")):
+                with self.assertRaisesRegex(BootstrapError, "group access"):
+                    root_installer._ensure_service_group_access(path, mode=0o640)
+
+    def test_uninstall_state_helpers_fall_back_to_defaults(self) -> None:
+        installer = HostBootstrapInstaller(repo_root=Path(__file__).resolve().parents[1], install_root=Path("/tmp/stage"))
+        paths = HostInstallPaths()
+
+        self.assertEqual(installer._path_from_state([], "config_path", paths.config_path), paths.config_path)
+        self.assertEqual(installer._path_from_state({"config_path": "relative"}, "config_path", paths.config_path), paths.config_path)
+        self.assertEqual(
+            installer._systemd_unit_paths_from_state("not-a-list"),
+            paths.systemd_unit_paths,
+        )
+        self.assertIsNone(installer._conflicting_unit_state_from_state("not-a-dict"))
+
+    def test_main_dispatches_and_rejects_invalid_option_combinations(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        with TemporaryDirectory() as temp_dir, patch(
+            "relayinner_display.bootstrap.HostBootstrapInstaller"
+        ) as installer_class:
+            instance = installer_class.return_value
+            self.assertEqual(
+                main([
+                    "--repo-root",
+                    str(repo_root),
+                    "--root",
+                    temp_dir,
+                    "--skip-host-validation",
+                    "--skip-package-install",
+                    "--replace-config",
+                ]),
+                0,
+            )
+            instance.install.assert_called_once_with(
+                skip_host_validation=True,
+                skip_package_install=True,
+                replace_config=True,
+            )
+
+            self.assertEqual(
+                main(["--repo-root", str(repo_root), "--root", temp_dir, "--uninstall", "--purge-config"]),
+                0,
+            )
+            instance.uninstall.assert_called_once_with(purge_config=True)
+
+        invalid_args = (
+            ["--uninstall", "--replace-config"],
+            ["--uninstall", "--skip-package-install"],
+            ["--uninstall", "--skip-host-validation"],
+            ["--purge-config"],
+        )
+        for extra_args in invalid_args:
+            with self.subTest(extra_args=extra_args):
+                with TemporaryDirectory() as temp_dir, patch(
+                    "relayinner_display.bootstrap.HostBootstrapInstaller"
+                ):
+                    self.assertEqual(
+                        main(["--repo-root", str(repo_root), "--root", temp_dir, *extra_args]),
+                        1,
+                    )
+
+    def test_module_entrypoint_dispatches_to_main(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        with TemporaryDirectory() as temp_dir, patch.object(
+            sys,
+            "argv",
+            [
+                "relayinner-display-bootstrap",
+                "--repo-root",
+                str(repo_root),
+                "--root",
+                temp_dir,
+                "--skip-host-validation",
+                "--skip-package-install",
+            ],
+        ), patch("subprocess.run", new=FakeRunner()):
+            with self.assertRaises(SystemExit) as context:
+                runpy.run_module("relayinner_display.bootstrap", run_name="__main__")
+
+        self.assertEqual(context.exception.code, 0)
 
 
 if __name__ == "__main__":
