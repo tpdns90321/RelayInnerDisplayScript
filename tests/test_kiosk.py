@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from io import StringIO
 from unittest.mock import patch
 import unittest
 
@@ -42,6 +43,24 @@ class KioskTests(unittest.TestCase):
                 "PATH": "/usr/bin",
                 "XDG_SESSION_TYPE": "wayland",
             },
+        )
+
+    def test_entrypoint_reports_exec_failure(self) -> None:
+        def failing_exec(program: str, argv: list[str], env: dict[str, str]) -> None:
+            raise OSError("not executable")
+
+        stderr = StringIO()
+
+        with patch("sys.stderr", stderr):
+            result = main(
+                ["--config", "/tmp/relay.toml", "--session-binary", "/opt/bin/session"],
+                execvpe=failing_exec,
+            )
+
+        self.assertEqual(result, 127)
+        self.assertIn(
+            "relayinner-display-session-entrypoint: failed to exec /opt/bin/session: not executable",
+            stderr.getvalue(),
         )
 
     def test_entrypoint_uses_absolute_installed_session_launcher_without_path(self) -> None:
