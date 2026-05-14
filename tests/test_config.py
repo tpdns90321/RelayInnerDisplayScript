@@ -67,6 +67,17 @@ class ConfigTests(unittest.TestCase):
             Path("/run/relayinner-display/console/spice-current.vv"),
         )
 
+    def test_load_config_reports_missing_file_and_invalid_toml(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            missing_path = Path(temp_dir) / "missing.toml"
+            with self.assertRaisesRegex(ConfigError, "Config file not found"):
+                load_config(missing_path)
+
+            invalid_path = Path(temp_dir) / "config.toml"
+            invalid_path.write_text("[target\n", encoding="utf-8")
+            with self.assertRaisesRegex(ConfigError, "Invalid TOML"):
+                load_config(invalid_path)
+
     def test_load_config_accepts_display_overrides(self) -> None:
         content = VALID_CONFIG.replace(
             'command_timeout_s = 10\n',
