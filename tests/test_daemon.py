@@ -27,6 +27,7 @@ from relayinner_display.config import (
 )
 from relayinner_display.daemon import (
     DisplayDaemon,
+    chown_if_present,
     MoonlightServerInfoAuthError,
     MoonlightServerInfoConnectionError,
     RuntimeValidationError,
@@ -789,6 +790,114 @@ class DisplayDaemonTests(unittest.TestCase):
             )
             with self.assertRaisesRegex(RuntimeValidationError, "Unable to determine Moonlight version"):
                 bad_version_daemon._moonlight_version("moonlight")
+
+    def test_moonlight_helpers_assert_when_backend_config_is_absent(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            daemon = DisplayDaemon(config=build_config(Path(temp_dir)), proxmox=FakeProxmoxClient(["stopped"]))
+            assertion_helpers = [
+                lambda: daemon._handle_moonlight_pairing(datetime(2026, 4, 4, tzinfo=timezone.utc)),
+                lambda: daemon._moonlight_pair_waiting_message(),
+                lambda: daemon._probe_moonlight_pair_state("host", False),
+                lambda: daemon._moonlight_workspace_host_records(),
+                lambda: daemon._moonlight_workspace_root_settings(),
+                lambda: daemon._moonlight_workspace_server_certificate("host", allow_any_paired_host=True),
+                lambda: daemon._normalize_moonlight_workspace_host(),
+                lambda: daemon._moonlight_app_is_available(["Desktop"]),
+                lambda: daemon._moonlight_app_uses_desktop_stream(),
+                lambda: daemon._moonlight_host_reuses_existing_pairing(),
+                lambda: daemon._moonlight_list_apps(),
+                lambda: daemon._prepare_moonlight_pair_launch("1234"),
+                lambda: daemon._run_moonlight_command(["list", "host"]),
+            ]
+
+            for helper in assertion_helpers:
+                with self.subTest(helper=helper):
+                    with self.assertRaisesRegex(AssertionError, "Moonlight"):
+                        helper()
+
+    def test_console_launch_and_low_level_helper_defensive_branches(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            config = build_config(Path(temp_dir), backend="vnc")
+            daemon = DisplayDaemon(config=config, proxmox=FakeProxmoxClient(["running"]))
+            assert config.console.vnc is not None
+            object.__setattr__(config.console, "vnc", None)
+            with self.assertRaisesRegex(AssertionError, "VNC backend selected"):
+                daemon._prepare_console_launch()
+
+            looking_glass_config = build_config(Path(temp_dir) / "lg", backend="looking-glass")
+            looking_glass_daemon = DisplayDaemon(
+                config=looking_glass_config,
+                proxmox=FakeProxmoxClient(["running"]),
+            )
+            assert looking_glass_config.console.looking_glass is not None
+            object.__setattr__(looking_glass_config.console, "looking_glass", None)
+            with self.assertRaisesRegex(AssertionError, "Looking Glass backend selected"):
+                looking_glass_daemon._prepare_console_launch()
+            with self.assertRaisesRegex(AssertionError, "Looking Glass backend selected"):
+                looking_glass_daemon._validate_looking_glass_preflight(
+                    check_binary=False,
+                    check_session_access=False,
+                )
+
+            moonlight_config = build_config(Path(temp_dir) / "moonlight", backend="moonlight")
+            moonlight_daemon = DisplayDaemon(
+                config=moonlight_config,
+                proxmox=FakeProxmoxClient(["running"]),
+            )
+            assert moonlight_config.console.moonlight is not None
+            object.__setattr__(moonlight_config.console, "moonlight", None)
+            with self.assertRaisesRegex(AssertionError, "Moonlight backend selected"):
+                moonlight_daemon._prepare_console_launch()
+            with self.assertRaisesRegex(AssertionError, "Moonlight backend selected"):
+                moonlight_daemon._validate_moonlight_startup_prerequisites(check_binary=False)
+
+            unknown_config = build_config(Path(temp_dir) / "unknown")
+            object.__setattr__(unknown_config.target, "console_backend", "serial")
+            unknown_daemon = DisplayDaemon(config=unknown_config, proxmox=FakeProxmoxClient(["running"]))
+            with self.assertRaisesRegex(AssertionError, "Unhandled console backend"):
+                unknown_daemon._prepare_console_launch()
+
+            vnc_runtime_config = build_config(Path(temp_dir) / "vnc-runtime", backend="vnc")
+            self.assertEqual(
+                DisplayDaemon(config=vnc_runtime_config, proxmox=FakeProxmoxClient(["stopped"]))._spice_vv_path(),
+                vnc_runtime_config.runtime.spice_vv_path,
+            )
+
+            class FakeTcpConnection:
+                closed = False
+
+                def close(self) -> None:
+                    self.__class__.closed = True
+
+            with patch("relayinner_display.daemon.socket.create_connection", return_value=FakeTcpConnection()) as connect:
+                daemon._probe_tcp_connectivity("127.0.0.1", 47989, 1.5)
+            connect.assert_called_once_with(("127.0.0.1", 47989), timeout=1.5)
+            self.assertTrue(FakeTcpConnection.closed)
+
+            path = Path(temp_dir) / "owned"
+            path.write_text("owned", encoding="utf-8")
+            with patch("relayinner_display.daemon.pwd.getpwnam", return_value=SimpleNamespace(pw_uid=12)), patch(
+                "relayinner_display.daemon.grp.getgrnam",
+                return_value=SimpleNamespace(gr_gid=34),
+            ), patch("relayinner_display.daemon.os.chown", side_effect=PermissionError):
+                chown_if_present(path, "relayinner-display", "relayinner-display", daemon.logger)
+
+    def test_display_power_intent_noops_without_ready_session_or_stable_power_state(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            config = build_config(Path(temp_dir), dpms_off_delay_ms=1000, power_state_stabilize_ms=1000)
+            daemon = DisplayDaemon(config=config, proxmox=FakeProxmoxClient(["stopped"]))
+            timestamp = datetime(2026, 4, 4, tzinfo=timezone.utc)
+            daemon.state.vm_power_state = "running"
+            daemon.state.display_power_intent = "off"
+            daemon.session_ready = False
+
+            self.assertEqual(daemon._update_display_power_intent(timestamp), [])
+            daemon.state.vm_power_state = "stopped"
+            daemon._power_state_since_at = None
+            self.assertIsNone(daemon._desired_display_power_intent(timestamp))
+            daemon._startup_display_policy_pending = True
+            daemon.started_at = None
+            self.assertIsNone(daemon._desired_display_power_intent(timestamp))
 
     def test_running_vm_connects_and_reconnects_after_viewer_exit(self) -> None:
         with TemporaryDirectory() as temp_dir:
