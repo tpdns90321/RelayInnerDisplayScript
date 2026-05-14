@@ -143,6 +143,19 @@ class KioskLauncherTests(unittest.TestCase):
 
         self.assertEqual(outputs, {"HDMI-A-1"})
 
+    def test_detect_connected_drm_outputs_handles_missing_and_unreadable_status_files(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            self.assertIsNone(detect_connected_drm_outputs(root))
+
+            connected = root / "card0-HDMI-A-1"
+            connected.mkdir()
+            (connected / "status").write_text("connected\n", encoding="utf-8")
+            with patch.object(Path, "read_text", side_effect=OSError("denied")):
+                outputs = detect_connected_drm_outputs(root)
+
+        self.assertEqual(outputs, set())
+
     def test_main_writes_sway_config_and_execs_sway_for_moonlight_auto(self) -> None:
         captured: dict[str, object] = {}
 
