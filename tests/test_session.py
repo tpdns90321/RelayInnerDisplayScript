@@ -19,7 +19,11 @@ from relayinner_display.config import (
     TargetConfig,
     resolve_kiosk_compositor,
 )
-from relayinner_display.session import SessionSocketClient, SessionSupervisor
+from relayinner_display.session import (
+    SessionSocketClient,
+    SessionSupervisor,
+    parse_wlr_randr_outputs,
+)
 
 
 class FakeProcess:
@@ -74,6 +78,20 @@ class FakeSocket:
 
     def close(self) -> None:
         self.closed = True
+
+
+class WlrRandrOutputParsingTests(unittest.TestCase):
+    def test_parse_outputs_ignores_invalid_names_and_duplicates(self) -> None:
+        output = """\
+HDMI-A-1 "Built-in display"
+  Enabled: yes
+bad:name "Invalid connector"
+DP-1 "External"
+DP-1 "Duplicate external"
+Virtual_2.Description extra data
+"""
+
+        self.assertEqual(parse_wlr_randr_outputs(output), ["HDMI-A-1", "DP-1", "Virtual_2.Description"])
 
 
 class SessionSocketClientTests(unittest.TestCase):

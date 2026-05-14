@@ -1,6 +1,6 @@
 # TDD Cycle Workflow
 
-This repository has a confirmed TDD-cycle policy in `.pi/tdd-cycle/config.json`. The policy is intentionally narrow: red-phase test writes are limited to the tracked suite under `tests/**`, green and refactor phases may not edit tests by default, coverage enforcement is an explicit opt-in gate for managed cycles, and no network domains are allowed unless a later spec changes the policy.
+This repository has a confirmed TDD-cycle policy in `.pi/tdd-cycle/config.json`. The policy is intentionally narrow: red-phase test writes are limited to unittest files matching `tests/test_*.py`, green and refactor phases may not edit tests by default, coverage enforcement is an explicit opt-in gate for managed cycles, and no network domains are allowed unless a later spec changes the policy.
 
 The TDD-cycle runtime folders `.tdd-cycle/`, `red/`, `green/`, and `refactor/` are disposable local state and are ignored by git. Relay-managed coverage output is written under `coverage/`, which is also ignored by git. Phase preflight may also refresh the managed repo-view marker `.tdd-cycle-repo-view.json` and its temporary atomic-write file inside the phase `repo/` view; those marker writes are intentionally allowed as TDD-cycle tooling output so sandboxed phase preflight can complete.
 
