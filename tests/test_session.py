@@ -600,6 +600,44 @@ class SessionSupervisorTests(unittest.TestCase):
         self.assertFalse(supervisor.view_state.console_active)
         self.assertEqual(supervisor.view_state.status_text, "Degraded")
 
+    def test_connect_console_rejects_backend_that_does_not_match_config(self) -> None:
+        launches: list[list[str]] = []
+
+        def fake_factory(
+            command: list[str],
+            cwd: str | None = None,
+            env: dict[str, str] | None = None,
+            text: bool = True,
+        ) -> FakeProcess:
+            launches.append(command)
+            return FakeProcess(pid=9001)
+
+        supervisor = SessionSupervisor(config=build_config(backend="spice"), process_factory=fake_factory)
+        events = supervisor.handle_daemon_message(
+            {
+                "type": "connect_console",
+                "backend": "vnc",
+                "launcher": "remote-viewer",
+                "argv": ["remote-viewer", "--full-screen", "vnc://127.0.0.1:5977"],
+            }
+        )
+
+        self.assertEqual(
+            events,
+            [
+                {
+                    "type": "session_error",
+                    "reason": (
+                        "invalid_console_request: "
+                        "backend=vnc does not match configured backend=spice"
+                    ),
+                }
+            ],
+        )
+        self.assertEqual(launches, [])
+        self.assertFalse(supervisor.view_state.console_active)
+        self.assertEqual(supervisor.view_state.status_text, "Degraded")
+
     def test_connect_console_rejects_moonlight_argv0_mismatch(self) -> None:
         launches: list[list[str]] = []
 
