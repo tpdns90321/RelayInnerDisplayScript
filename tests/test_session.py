@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from pathlib import Path
+import socket
 import subprocess
 import unittest
+from unittest.mock import patch
 
 from relayinner_display.config import (
     AppConfig,
@@ -94,7 +96,40 @@ Virtual_2.Description extra data
         self.assertEqual(parse_wlr_randr_outputs(output), ["HDMI-A-1", "DP-1", "Virtual_2.Description"])
 
 
+class FakeConnectingSocket:
+    def __init__(self) -> None:
+        self.connected_path: str | None = None
+        self.blocking: bool | None = None
+
+    def connect(self, path: str) -> None:
+        self.connected_path = path
+
+    def setblocking(self, blocking: bool) -> None:
+        self.blocking = blocking
+
+
 class SessionSocketClientTests(unittest.TestCase):
+    def test_connect_opens_nonblocking_unix_socket_once(self) -> None:
+        created_sockets: list[FakeConnectingSocket] = []
+
+        def fake_socket(family: int, socket_type: int) -> FakeConnectingSocket:
+            self.assertEqual(family, socket.AF_UNIX)
+            self.assertEqual(socket_type, socket.SOCK_STREAM)
+            created_socket = FakeConnectingSocket()
+            created_sockets.append(created_socket)
+            return created_socket
+
+        client = SessionSocketClient(Path("/run/relayinner-display/session.sock"))
+
+        with patch("relayinner_display.session.socket.socket", side_effect=fake_socket):
+            client.connect()
+            client.connect()
+
+        self.assertEqual(len(created_sockets), 1)
+        self.assertIs(client.connection, created_sockets[0])
+        self.assertEqual(created_sockets[0].connected_path, "/run/relayinner-display/session.sock")
+        self.assertFalse(created_sockets[0].blocking)
+
     def test_send_message_serializes_payload_and_clears_connection_after_write_error(self) -> None:
         client = SessionSocketClient(Path("/run/relayinner-display/session.sock"))
         self.assertFalse(client.send_message({"type": "session_ready"}))
