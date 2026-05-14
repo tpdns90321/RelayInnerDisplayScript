@@ -373,18 +373,10 @@ class SessionSupervisor:
                 f"backend={backend} does not match configured backend={configured_backend}"
             )
 
-        allowed_launcher = CONSOLE_LAUNCHER_ALLOWLIST.get(backend)
         if backend == "moonlight":
-            moonlight = self.config.console.moonlight
-            if moonlight is None:
-                return "invalid_console_request: backend=moonlight is not configured"
-            if launcher != moonlight.binary or argv[0] != moonlight.binary:
-                return (
-                    "invalid_console_request: "
-                    f"backend={backend} launcher={launcher} argv0={argv[0]}"
-                )
-            return None
+            return self._validate_moonlight_console_request(launcher=launcher, argv=argv)
 
+        allowed_launcher = CONSOLE_LAUNCHER_ALLOWLIST.get(backend)
         if allowed_launcher is None:
             return f"invalid_console_request: backend={backend} is not supported"
 
@@ -394,6 +386,17 @@ class SessionSupervisor:
             return (
                 "invalid_console_request: "
                 f"backend={backend} launcher={launcher} argv0={argv[0]}"
+            )
+        return None
+
+    def _validate_moonlight_console_request(self, *, launcher: str, argv: list[str]) -> str | None:
+        moonlight = self.config.console.moonlight
+        if moonlight is None:
+            return "invalid_console_request: backend=moonlight is not configured"
+        if launcher != moonlight.binary or argv[0] != moonlight.binary:
+            return (
+                "invalid_console_request: "
+                f"backend=moonlight launcher={launcher} argv0={argv[0]}"
             )
         return None
 

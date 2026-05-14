@@ -688,6 +688,59 @@ class SessionSupervisorTests(unittest.TestCase):
         )
         self.assertEqual(launches, [])
 
+    def test_connect_console_rejects_moonlight_when_not_configured(self) -> None:
+        base_config = build_config(backend="moonlight")
+        config = AppConfig(
+            target=base_config.target,
+            runtime=base_config.runtime,
+            console=ConsoleConfig(artifact_dir=base_config.console.artifact_dir),
+            display=base_config.display,
+            kiosk=base_config.kiosk,
+            input=base_config.input,
+            policy=base_config.policy,
+        )
+        launches: list[list[str]] = []
+
+        def fake_factory(
+            command: list[str],
+            cwd: str | None = None,
+            env: dict[str, str] | None = None,
+            text: bool = True,
+        ) -> FakeProcess:
+            launches.append(command)
+            return FakeProcess(pid=9005)
+
+        supervisor = SessionSupervisor(config=config, process_factory=fake_factory)
+        events = supervisor.handle_daemon_message(
+            {
+                "type": "connect_console",
+                "backend": "moonlight",
+                "launcher": "moonlight",
+                "cwd": "/var/lib/relayinner-display/moonlight",
+                "argv": [
+                    "moonlight",
+                    "stream",
+                    "192.168.50.20",
+                    "Desktop",
+                    "--display-mode",
+                    "fullscreen",
+                ],
+            }
+        )
+
+        self.assertEqual(
+            events,
+            [
+                {
+                    "type": "session_error",
+                    "reason": "invalid_console_request: backend=moonlight is not configured",
+                }
+            ],
+        )
+        self.assertEqual(launches, [])
+        self.assertFalse(supervisor.view_state.console_active)
+        self.assertEqual(supervisor.view_state.status_text, "Degraded")
+
     def test_intentional_disconnect_suppresses_console_exit_event(self) -> None:
         process = FakeProcess(pid=100)
 
