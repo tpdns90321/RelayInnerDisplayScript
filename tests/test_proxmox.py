@@ -236,6 +236,23 @@ class ProxmoxTests(unittest.TestCase):
                 with self.assertRaisesRegex(error_type, message):
                     client.read_vnc_endpoint(101)
 
+    def test_read_vnc_endpoint_rejects_unsupported_endpoint_values(self) -> None:
+        cases = [
+            ("127.0.0.1", "Unsupported VNC endpoint syntax"),
+            (":77", "Unsupported VNC endpoint syntax"),
+            ("127.0.0.1:not-a-number", "Unsupported VNC display number"),
+            ("127.0.0.1:-1", "Unsupported VNC display number"),
+        ]
+
+        for endpoint, message in cases:
+            with self.subTest(endpoint=endpoint):
+                def runner(command: list[str], timeout_s: int, endpoint: str = endpoint) -> CommandResult:
+                    return CommandResult(args=tuple(command), returncode=0, stdout=f"args: -vnc {endpoint}\n", stderr="")
+
+                client = ProxmoxClient(timeout_s=10, runner=runner)
+                with self.assertRaisesRegex(VncConfigurationError, message):
+                    client.read_vnc_endpoint(101)
+
     def test_validate_vnc_configuration_rejects_non_loopback_bind(self) -> None:
         def runner(command: list[str], timeout_s: int) -> CommandResult:
             return CommandResult(
