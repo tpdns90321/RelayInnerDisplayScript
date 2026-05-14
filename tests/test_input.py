@@ -33,6 +33,26 @@ class EvdevPowerButtonSourceTests(unittest.TestCase):
         ):
             source.open()
 
+    def test_open_reports_device_open_errors(self) -> None:
+        class FailingInputDevice:
+            def __init__(self, path: str) -> None:
+                raise OSError("permission denied")
+
+        fake_evdev = types.SimpleNamespace(
+            InputDevice=FailingInputDevice,
+            ecodes=types.SimpleNamespace(EV_KEY=1, KEY_POWER=116),
+        )
+        source = EvdevPowerButtonSource("/dev/input/event0")
+
+        with (
+            patch.dict(sys.modules, {"evdev": fake_evdev}),
+            self.assertRaisesRegex(
+                PowerButtonError,
+                "Unable to open power-button device /dev/input/event0: permission denied",
+            ),
+        ):
+            source.open()
+
     def test_open_poll_and_close_counts_power_key_presses(self) -> None:
         events = [
             types.SimpleNamespace(type=1, code=116, value=0),
