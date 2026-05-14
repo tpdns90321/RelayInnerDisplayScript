@@ -753,6 +753,38 @@ class SessionSupervisorTests(unittest.TestCase):
         self.assertFalse(supervisor.view_state.console_active)
         self.assertEqual(supervisor.view_state.status_text, "Connection lost")
 
+    def test_poll_console_keeps_running_console_active_without_exit_event(self) -> None:
+        process = FakeProcess(pid=104)
+
+        def fake_factory(
+            command: list[str],
+            cwd: str | None = None,
+            env: dict[str, str] | None = None,
+            text: bool = True,
+        ) -> FakeProcess:
+            return process
+
+        supervisor = SessionSupervisor(config=build_config(), process_factory=fake_factory)
+        supervisor.handle_daemon_message(
+            {
+                "type": "connect_console",
+                "backend": "spice",
+                "launcher": "remote-viewer",
+                "argv": [
+                    "remote-viewer",
+                    "--full-screen",
+                    "/run/relayinner-display/console/spice-current.vv",
+                ],
+            }
+        )
+
+        event = supervisor.poll_console()
+
+        self.assertIsNone(event)
+        self.assertFalse(process.terminated)
+        self.assertTrue(supervisor.view_state.console_active)
+        self.assertEqual(supervisor.view_state.status_text, "Connecting")
+
     def test_unexpected_exit_reports_console_exited_with_backend(self) -> None:
         process = FakeProcess(pid=100)
 
