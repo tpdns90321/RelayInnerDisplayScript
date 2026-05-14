@@ -127,6 +127,21 @@ class ProxmoxTests(unittest.TestCase):
         self.assertIn("host=127.0.0.1", content)
         self.assertIn("port=61000", content)
 
+    def test_request_spice_config_rejects_invalid_json_and_non_object_payloads(self) -> None:
+        cases = [
+            ("not json", "pvesh returned invalid JSON"),
+            (json.dumps(["not", "object"]), "spiceproxy did not return a JSON object"),
+        ]
+
+        for stdout, message in cases:
+            with self.subTest(stdout=stdout):
+                def runner(command: list[str], timeout_s: int, stdout: str = stdout) -> CommandResult:
+                    return CommandResult(args=tuple(command), returncode=0, stdout=stdout, stderr="")
+
+                client = ProxmoxClient(timeout_s=10, runner=runner, fqdn_resolver=lambda: "pve.test")
+                with self.assertRaisesRegex(ProxmoxCommandError, message):
+                    client.request_spice_config("pve", 101)
+
     def test_write_vv_file_escapes_multiline_values_for_ini_format(self) -> None:
         client = ProxmoxClient(timeout_s=10, runner=lambda command, timeout_s: None)  # type: ignore[arg-type]
 
