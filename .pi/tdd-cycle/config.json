@@ -18,7 +18,9 @@
     ]
   },
   "testOutputGlobs": [
-    "tmp/test-output/**"
+    "tmp/test-output/**",
+    ".tdd-cycle-repo-view.json",
+    ".tdd-cycle-repo-view.json.tmp-*"
   ],
   "network": {
     "allowedDomains": [],
