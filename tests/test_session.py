@@ -149,6 +149,20 @@ class SessionSocketClientTests(unittest.TestCase):
         self.assertIsNone(client.connection)
         self.assertEqual(client.buffer, b"")
 
+    def test_read_messages_treats_receive_errors_as_disconnect(self) -> None:
+        client = SessionSocketClient(Path("/run/relayinner-display/session.sock"))
+        failing_socket = FakeSocket([ConnectionResetError("reset")])
+        client.connection = failing_socket
+        client.buffer = b'{"type":"health_ping"'
+
+        messages, disconnected = client.read_messages()
+
+        self.assertEqual(messages, [])
+        self.assertTrue(disconnected)
+        self.assertTrue(failing_socket.closed)
+        self.assertIsNone(client.connection)
+        self.assertEqual(client.buffer, b"")
+
     def test_read_messages_buffers_partial_frames_until_newline_and_detects_disconnect(self) -> None:
         client = SessionSocketClient(Path("/run/relayinner-display/session.sock"))
         first_socket = FakeSocket([b'{"type":"health_ping"'])
