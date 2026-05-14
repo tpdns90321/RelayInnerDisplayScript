@@ -26,6 +26,7 @@ from relayinner_display.config import (
 )
 from relayinner_display.daemon import (
     DisplayDaemon,
+    RuntimeValidationError,
     SessionSocketServer,
     generate_moonlight_pin,
     parse_moonlight_app_list_csv,
@@ -452,6 +453,166 @@ class DisplayDaemonTests(unittest.TestCase):
         self.assertIsNone(daemon.console_pid)
         self.assertEqual(daemon.state.session_state, SessionState.DEGRADED)
         self.assertEqual(daemon.state.degraded_reason, "viewer crashed")
+
+    def test_session_ready_handles_vm_status_failure_and_pairing_wait(self) -> None:
+        start_time = datetime(2026, 4, 4, 0, 0, tzinfo=timezone.utc)
+        with TemporaryDirectory() as temp_dir:
+            daemon = DisplayDaemon(config=build_config(Path(temp_dir)), proxmox=FakeProxmoxClient(["running"]))
+            daemon.prepare_runtime()
+            daemon.start(now=start_time)
+            daemon.state.session_state = SessionState.DEGRADED
+            with patch.object(daemon, "_reapply_display_power", return_value=[]), patch.object(
+                daemon,
+                "_refresh_vm_status",
+                return_value=(None, [{"type": "show_waiting", "reason": "proxmox"}]),
+            ):
+                degraded_actions = daemon.handle_session_message({"type": "session_ready"}, now=start_time)
+
+            daemon.state.session_state = SessionState.WAITING_FOR_SESSION
+            with patch.object(daemon, "_reapply_display_power", return_value=[]), patch.object(
+                daemon,
+                "_refresh_vm_status",
+                return_value=(None, [{"type": "show_waiting", "reason": "proxmox"}]),
+            ):
+                stopped_actions = daemon.handle_session_message({"type": "session_ready"}, now=start_time)
+
+        self.assertEqual(
+            degraded_actions,
+            [
+                {"type": "show_waiting", "reason": "proxmox"},
+                {"type": "show_waiting", "reason": "degraded"},
+            ],
+        )
+        self.assertEqual(
+            stopped_actions,
+            [
+                {"type": "show_waiting", "reason": "proxmox"},
+                {"type": "show_waiting", "reason": "vm_stopped"},
+            ],
+        )
+
+        with TemporaryDirectory() as temp_dir:
+            daemon = DisplayDaemon(
+                config=build_config(Path(temp_dir), backend="moonlight"),
+                proxmox=FakeProxmoxClient(["running"]),
+            )
+            daemon.prepare_runtime()
+            daemon.start(now=start_time)
+            daemon.state.vm_power_state = "running"
+            daemon.state.moonlight_pair_state = MoonlightPairState.PENDING_PIN_APPROVAL
+            daemon.state.moonlight_pair_pin = "1234"
+            with patch.object(daemon, "_reapply_display_power", return_value=[]), patch.object(
+                daemon,
+                "_refresh_vm_status",
+                return_value=("running", []),
+            ):
+                pairing_actions = daemon.handle_session_message({"type": "session_ready"}, now=start_time)
+
+        self.assertEqual(daemon.state.session_state, SessionState.WAITING_FOR_PAIRING)
+        self.assertEqual(pairing_actions[0]["reason"], "pairing_required")
+        self.assertEqual(pairing_actions[0]["details"]["pin"], "1234")
+
+    def test_tick_disconnects_console_when_vm_turns_off(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            daemon = DisplayDaemon(config=build_config(Path(temp_dir)), proxmox=FakeProxmoxClient(["running"]))
+            start_time = datetime(2026, 4, 4, 0, 0, tzinfo=timezone.utc)
+            daemon.prepare_runtime()
+            daemon.start(now=start_time)
+            daemon.session_ready = True
+            daemon.console_running = True
+            daemon.console_pid = 42
+            daemon.state.active_console_backend = "spice"
+            daemon.state.session_state = SessionState.SHOWING_CONSOLE
+
+            def refresh_vm_status(_: datetime) -> tuple[str, list[dict[str, object]]]:
+                daemon.state.vm_power_state = "stopped"
+                return "stopped", []
+
+            with patch.object(daemon, "_refresh_vm_status", side_effect=refresh_vm_status), patch.object(
+                daemon,
+                "_update_display_power_intent",
+                return_value=[],
+            ):
+                actions = daemon.tick(now=start_time)
+
+        self.assertEqual(
+            actions,
+            [
+                {"type": "disconnect_console", "reason": "vm_not_running"},
+                {"type": "show_waiting", "reason": "vm_stopped"},
+            ],
+        )
+        self.assertFalse(daemon.console_running)
+        self.assertIsNone(daemon.console_pid)
+        self.assertIsNone(daemon.state.active_console_backend)
+        self.assertEqual(daemon.state.session_state, SessionState.WAITING_FOR_VM)
+
+    def test_tick_degrades_on_pairing_and_proxmox_launch_failures(self) -> None:
+        start_time = datetime(2026, 4, 4, 0, 0, tzinfo=timezone.utc)
+        with TemporaryDirectory() as temp_dir:
+            daemon = DisplayDaemon(
+                config=build_config(Path(temp_dir), backend="moonlight"),
+                proxmox=FakeProxmoxClient(["running"]),
+            )
+            daemon.prepare_runtime()
+            daemon.start(now=start_time)
+            daemon.session_ready = True
+            daemon.console_running = True
+            daemon.state.active_console_backend = "moonlight"
+            daemon.state.moonlight_pair_state = MoonlightPairState.PENDING_PIN_APPROVAL
+            daemon.state.moonlight_pair_pin = "1234"
+
+            def refresh_vm_status(_: datetime) -> tuple[str, list[dict[str, object]]]:
+                daemon.state.vm_power_state = "running"
+                return "running", []
+
+            with patch.object(daemon, "_refresh_vm_status", side_effect=refresh_vm_status), patch.object(
+                daemon,
+                "_update_display_power_intent",
+                return_value=[],
+            ), patch.object(
+                daemon,
+                "_handle_moonlight_pairing",
+                side_effect=RuntimeValidationError("pair probe failed"),
+            ):
+                pairing_failure_actions = daemon.tick(now=start_time)
+
+        self.assertEqual(
+            pairing_failure_actions,
+            [
+                {"type": "disconnect_console", "reason": "control_error"},
+                {"type": "show_waiting", "reason": "degraded"},
+            ],
+        )
+        self.assertEqual(
+            daemon.state.degraded_reason,
+            "Console preparation failed for backend=moonlight: pair probe failed",
+        )
+
+        with TemporaryDirectory() as temp_dir:
+            daemon = DisplayDaemon(config=build_config(Path(temp_dir)), proxmox=FakeProxmoxClient(["running"]))
+            daemon.prepare_runtime()
+            daemon.start(now=start_time)
+            daemon.session_ready = True
+
+            def refresh_vm_status_for_launch(_: datetime) -> tuple[str, list[dict[str, object]]]:
+                daemon.state.vm_power_state = "running"
+                return "running", []
+
+            with patch.object(daemon, "_refresh_vm_status", side_effect=refresh_vm_status_for_launch), patch.object(
+                daemon,
+                "_update_display_power_intent",
+                return_value=[],
+            ), patch.object(
+                daemon,
+                "_prepare_console_launch",
+                side_effect=ProxmoxCommandError("qm spiceproxy failed"),
+            ):
+                launch_failure_actions = daemon.tick(now=start_time)
+
+        self.assertEqual(launch_failure_actions, [])
+        self.assertEqual(daemon.state.last_error, "qm spiceproxy failed")
+        self.assertEqual(daemon.proxmox_failure_timestamps, [start_time])
 
     def test_running_vm_connects_and_reconnects_after_viewer_exit(self) -> None:
         with TemporaryDirectory() as temp_dir:
