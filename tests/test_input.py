@@ -127,6 +127,31 @@ class LogindPowerButtonPolicyCheckerTests(unittest.TestCase):
             with self.assertRaises(PowerButtonError):
                 checker.validate()
 
+    def test_validate_ignores_irrelevant_logind_lines_and_missing_dropins(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            config_path = root / "logind.conf"
+            missing_dropin_dir = root / "missing-dropins"
+            config_path.write_text(
+                "\n"
+                "# global comment\n"
+                "HandlePowerKey=poweroff\n"
+                "[Service]\n"
+                "HandlePowerKey=poweroff\n"
+                "NoEqualsHere\n"
+                "[Login]\n"
+                "NoEqualsHere\n"
+                "HandlePowerKey=ignore ; local comment\n",
+                encoding="utf-8",
+            )
+
+            checker = LogindPowerButtonPolicyChecker(
+                main_configs=(config_path,),
+                dropin_dirs=(missing_dropin_dir,),
+            )
+
+            checker.validate()
+
 
 if __name__ == "__main__":
     unittest.main()
