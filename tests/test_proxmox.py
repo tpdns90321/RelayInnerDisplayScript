@@ -230,6 +230,19 @@ class ProxmoxTests(unittest.TestCase):
         with self.assertRaises(VncConfigurationError):
             client.validate_vnc_configuration(101, bind_host="127.0.0.1", display_number=77)
 
+    def test_validate_vnc_configuration_rejects_loopback_bind_host_mismatch(self) -> None:
+        def runner(command: list[str], timeout_s: int) -> CommandResult:
+            return CommandResult(
+                args=tuple(command),
+                returncode=0,
+                stdout="args: -vnc localhost:77\n",
+                stderr="",
+            )
+
+        client = ProxmoxClient(timeout_s=10, runner=runner)
+        with self.assertRaisesRegex(VncConfigurationError, "does not match relay config"):
+            client.validate_vnc_configuration(101, bind_host="127.0.0.2", display_number=77)
+
     def test_probe_vnc_endpoint_reports_unreachable_socket(self) -> None:
         client = ProxmoxClient(timeout_s=10, runner=lambda command, timeout_s: None)  # type: ignore[arg-type]
 
