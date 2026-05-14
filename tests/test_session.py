@@ -163,6 +163,18 @@ class SessionSocketClientTests(unittest.TestCase):
         self.assertIsNone(client.connection)
         self.assertEqual(client.buffer, b"")
 
+    def test_read_messages_ignores_blank_frames_and_continues_parsing(self) -> None:
+        client = SessionSocketClient(Path("/run/relayinner-display/session.sock"))
+        socket_with_blank_frames = FakeSocket([b'\n  \n{"type":"health_ping"}\n'])
+        client.connection = socket_with_blank_frames
+
+        messages, disconnected = client.read_messages()
+
+        self.assertEqual(messages, [{"type": "health_ping"}])
+        self.assertFalse(disconnected)
+        self.assertFalse(socket_with_blank_frames.closed)
+        self.assertEqual(client.buffer, b"")
+
     def test_read_messages_buffers_partial_frames_until_newline_and_detects_disconnect(self) -> None:
         client = SessionSocketClient(Path("/run/relayinner-display/session.sock"))
         first_socket = FakeSocket([b'{"type":"health_ping"'])
