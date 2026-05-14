@@ -639,6 +639,56 @@ class SessionSupervisorTests(unittest.TestCase):
         self.assertFalse(supervisor.view_state.console_active)
         self.assertEqual(supervisor.view_state.status_text, "Degraded")
 
+    def test_connect_console_rejects_unsupported_configured_backend(self) -> None:
+        base_config = build_config(backend="spice")
+        config = AppConfig(
+            target=TargetConfig(
+                vmid=base_config.target.vmid,
+                node_name=base_config.target.node_name,
+                guest_os=base_config.target.guest_os,
+                console_backend="serial",
+            ),
+            runtime=base_config.runtime,
+            console=ConsoleConfig(artifact_dir=base_config.console.artifact_dir),
+            display=base_config.display,
+            kiosk=base_config.kiosk,
+            input=base_config.input,
+            policy=base_config.policy,
+        )
+        launches: list[list[str]] = []
+
+        def fake_factory(
+            command: list[str],
+            cwd: str | None = None,
+            env: dict[str, str] | None = None,
+            text: bool = True,
+        ) -> FakeProcess:
+            launches.append(command)
+            return FakeProcess(pid=9001)
+
+        supervisor = SessionSupervisor(config=config, process_factory=fake_factory)
+        events = supervisor.handle_daemon_message(
+            {
+                "type": "connect_console",
+                "backend": "serial",
+                "launcher": "serial-client",
+                "argv": ["serial-client"],
+            }
+        )
+
+        self.assertEqual(
+            events,
+            [
+                {
+                    "type": "session_error",
+                    "reason": "invalid_console_request: backend=serial is not supported",
+                }
+            ],
+        )
+        self.assertEqual(launches, [])
+        self.assertFalse(supervisor.view_state.console_active)
+        self.assertEqual(supervisor.view_state.status_text, "Degraded")
+
     def test_connect_console_rejects_moonlight_argv0_mismatch(self) -> None:
         launches: list[list[str]] = []
 
