@@ -502,6 +502,28 @@ class SessionSupervisorTests(unittest.TestCase):
 
         self.assertEqual(events, [{"type": "console_started", "pid": 9001}])
 
+    def test_connect_spice_compatibility_reports_legacy_console_exit(self) -> None:
+        process = FakeProcess(pid=9001)
+
+        def fake_factory(
+            command: list[str],
+            cwd: str | None = None,
+            env: dict[str, str] | None = None,
+            text: bool = True,
+        ) -> FakeProcess:
+            return process
+
+        supervisor = SessionSupervisor(config=build_config(), process_factory=fake_factory)
+        supervisor.handle_daemon_message(
+            {"type": "connect_spice", "vv_path": "/run/relayinner-display/current.vv"}
+        )
+        process.returncode = -9
+
+        event = supervisor.poll_console()
+
+        self.assertEqual(event, {"type": "console_exited", "code": 0, "signal": 9})
+        self.assertEqual(supervisor.view_state.status_text, "Connection lost")
+
     def test_connect_console_reports_viewer_launch_failure(self) -> None:
         def failing_factory(
             command: list[str],

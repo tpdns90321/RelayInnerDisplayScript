@@ -181,7 +181,7 @@ class SessionSupervisor:
         self.active_console_backend: str | None = None
         self.view_state = SessionViewState()
         self._suppress_exit_report = False
-        self._send_legacy_console_events = False
+        self._active_console_uses_legacy_events = False
 
     def session_ready_message(self) -> dict[str, object]:
         return {"type": "session_ready"}
@@ -250,7 +250,7 @@ class SessionSupervisor:
         self._refresh_view_state()
         if self._suppress_exit_report:
             self._suppress_exit_report = False
-            self._send_legacy_console_events = False
+            self._active_console_uses_legacy_events = False
             return None
 
         event: dict[str, object] = {
@@ -258,9 +258,9 @@ class SessionSupervisor:
             "code": max(exit_status, 0),
             "signal": abs(exit_status) if exit_status < 0 else 0,
         }
-        if not self._send_legacy_console_events:
+        if not self._active_console_uses_legacy_events:
             event["backend"] = backend
-        self._send_legacy_console_events = False
+        self._active_console_uses_legacy_events = False
         self.console_logger.warning("Console exited unexpectedly: backend=%s event=%s", backend, event)
         return event
 
@@ -315,7 +315,7 @@ class SessionSupervisor:
         self.console_process = process
         self.active_console_backend = backend
         self._suppress_exit_report = False
-        self._send_legacy_console_events = legacy_events
+        self._active_console_uses_legacy_events = legacy_events
         self._refresh_view_state()
         self.console_logger.info(
             "Console started: backend=%s launcher=%s pid=%s",
@@ -331,7 +331,7 @@ class SessionSupervisor:
     def _stop_console(self, report_exit: bool) -> None:
         if self.console_process is None:
             self._suppress_exit_report = False
-            self._send_legacy_console_events = False
+            self._active_console_uses_legacy_events = False
             self.active_console_backend = None
             self._refresh_view_state()
             return
@@ -344,7 +344,7 @@ class SessionSupervisor:
         finally:
             self.console_process = None
             self.active_console_backend = None
-            self._send_legacy_console_events = False
+            self._active_console_uses_legacy_events = False
             self._refresh_view_state()
 
     def _wait_for_console_process_exit(self, process: subprocess.Popen[str]) -> None:
