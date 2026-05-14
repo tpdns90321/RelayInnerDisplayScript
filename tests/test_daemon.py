@@ -899,6 +899,166 @@ class DisplayDaemonTests(unittest.TestCase):
             daemon.started_at = None
             self.assertIsNone(daemon._desired_display_power_intent(timestamp))
 
+    def test_moonlight_pairing_and_app_list_edge_branches(self) -> None:
+        start_time = datetime(2026, 4, 4, tzinfo=timezone.utc)
+        with TemporaryDirectory() as temp_dir:
+            state_dir = Path(temp_dir) / "moonlight-state"
+            config = build_config(Path(temp_dir), backend="moonlight", moonlight_state_dir=state_dir)
+            daemon = DisplayDaemon(
+                config=config,
+                proxmox=FakeProxmoxClient(["running"]),
+                command_runner=lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout="Moonlight 6.1.0\n", stderr=""),
+                tcp_connect_probe=lambda host, port, timeout_s: None,
+            )
+            daemon.prepare_runtime()
+            daemon.start(now=start_time)
+            daemon.state.vm_power_state = "running"
+            daemon.session_ready = True
+
+            with patch.object(daemon, "_handle_moonlight_pairing", side_effect=RuntimeValidationError("pair failed")):
+                degraded_actions = daemon.tick(now=start_time)
+
+            daemon = DisplayDaemon(
+                config=config,
+                proxmox=FakeProxmoxClient(["running"]),
+                command_runner=lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout="Moonlight 6.1.0\n", stderr=""),
+                tcp_connect_probe=lambda host, port, timeout_s: None,
+                pin_generator=lambda: "9876",
+                moonlight_pair_state_probe=lambda host_authority, allow_any_paired_host: "unreachable",
+            )
+            daemon.prepare_runtime()
+            daemon.start(now=start_time)
+            daemon.state.vm_power_state = "running"
+            daemon.session_ready = True
+            reconnect_actions = daemon.tick(now=start_time)
+
+            daemon.moonlight_pair_state_probe = lambda host_authority, allow_any_paired_host: "unpaired"
+            daemon.state.moonlight_pair_state = MoonlightPairState.PENDING_PIN_APPROVAL
+            daemon.state.moonlight_pair_pin = "9876"
+            daemon.moonlight_pair_requested_at = start_time
+            daemon.moonlight_pair_launch_pending = True
+            daemon.state.session_state = SessionState.REQUESTING_CONSOLE
+            waiting_blocked, waiting_actions = daemon._handle_moonlight_pairing(start_time)
+
+            detail_runner = lambda *args, **kwargs: SimpleNamespace(returncode=1, stdout="", stderr="list failed")
+            detail_daemon = DisplayDaemon(config=config, proxmox=FakeProxmoxClient(["stopped"]), command_runner=detail_runner)
+            with self.assertRaisesRegex(RuntimeValidationError, "list failed"):
+                detail_daemon._moonlight_list_apps()
+
+            nodetail_runner = lambda *args, **kwargs: SimpleNamespace(returncode=2, stdout="", stderr="")
+            nodetail_daemon = DisplayDaemon(config=config, proxmox=FakeProxmoxClient(["stopped"]), command_runner=nodetail_runner)
+            with self.assertRaisesRegex(RuntimeValidationError, "exit code 2"):
+                nodetail_daemon._moonlight_list_apps()
+
+            oserror_runner = lambda *args, **kwargs: (_ for _ in ()).throw(OSError("exec failed"))
+            oserror_daemon = DisplayDaemon(config=config, proxmox=FakeProxmoxClient(["stopped"]), command_runner=oserror_runner)
+            with self.assertRaisesRegex(RuntimeValidationError, "Failed to run Moonlight command"):
+                oserror_daemon._run_moonlight_command(["list", "192.168.50.20"])
+
+        self.assertEqual(degraded_actions, [{"type": "show_waiting", "reason": "degraded"}])
+        self.assertEqual(
+            reconnect_actions,
+            [{"type": "show_waiting", "reason": "reconnecting"}],
+        )
+        self.assertEqual(daemon.state.session_state, SessionState.WAITING_FOR_PAIRING)
+        self.assertTrue(waiting_blocked)
+        self.assertEqual(waiting_actions[0]["reason"], "pairing_required")
+
+    def test_moonlight_live_probe_exception_and_workspace_io_edges(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            state_dir = Path(temp_dir) / "moonlight-state"
+            config = build_config(Path(temp_dir), backend="moonlight", moonlight_state_dir=state_dir)
+            daemon = DisplayDaemon(config=config, proxmox=FakeProxmoxClient(["stopped"]))
+            daemon.prepare_runtime()
+            write_moonlight_host_settings(
+                state_dir,
+                "192.168.50.20",
+                client_certificate="cert",
+                client_key="key",
+            )
+            self.assertEqual(daemon._decode_moonlight_qsettings_bytearray("@ByteArray(trailing\\)"), "trailing\\")
+
+            for error, expected in [
+                (MoonlightServerInfoConnectionError("offline"), "unreachable"),
+                (MoonlightServerInfoAuthError("unpaired"), "unpaired"),
+                (RuntimeValidationError("bad xml"), "unpaired"),
+            ]:
+                with self.subTest(error=error):
+                    calls = {"count": 0}
+
+                    def fake_read(**_: object) -> dict[str, str]:
+                        calls["count"] += 1
+                        if calls["count"] == 1:
+                            return {"HttpsPort": "47984"}
+                        raise error
+
+                    daemon._read_moonlight_serverinfo_fields = fake_read  # type: ignore[method-assign]
+                    self.assertEqual(daemon._probe_moonlight_pair_state("192.168.50.20", False), expected)
+
+            settings_path = state_dir / "Moonlight.ini"
+            settings_path.write_text(
+                "\n".join(
+                    [
+                        "[hosts]",
+                        "size=1",
+                        "# comment",
+                        "1\\hostname=192.168.50.20",
+                        "1\\manualaddress=192.168.50.20",
+                        "1\\manualport=47989",
+                        "1\\srvcert=@ByteArray(dummy-cert)",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            self.assertFalse(
+                daemon._rewrite_moonlight_workspace_settings_file(
+                    settings_path,
+                    host="192.168.50.20",
+                    port=47989,
+                )
+            )
+
+            with patch("relayinner_display.daemon.Path.stat", side_effect=OSError("stat failed")):
+                self.assertTrue(
+                    daemon._rewrite_moonlight_workspace_settings_file(
+                        settings_path,
+                        host="192.168.50.21",
+                        port=47990,
+                    )
+                )
+            with patch("relayinner_display.daemon.Path.write_text", side_effect=OSError("write failed")):
+                self.assertFalse(
+                    daemon._rewrite_moonlight_workspace_settings_file(
+                        settings_path,
+                        host="192.168.50.22",
+                        port=47991,
+                    )
+                )
+
+            with patch("relayinner_display.daemon.Path.read_text", side_effect=OSError("read failed")):
+                self.assertEqual(daemon._moonlight_workspace_host_records(), [])
+                self.assertEqual(daemon._moonlight_workspace_root_settings(), {})
+
+    def test_console_exit_waits_for_vm_when_power_state_is_not_running_and_module_entrypoint(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            config = build_config(Path(temp_dir))
+            daemon = DisplayDaemon(config=config, proxmox=FakeProxmoxClient(["stopped"]))
+            daemon.prepare_runtime()
+            daemon.start(now=datetime(2026, 4, 4, tzinfo=timezone.utc))
+            daemon.console_running = True
+            daemon.console_pid = 101
+            daemon.state.vm_power_state = "stopped"
+            actions = daemon.handle_session_message({"type": "console_exited", "code": 1, "signal": 0})
+
+        self.assertEqual(actions, [{"type": "show_waiting", "reason": "vm_stopped"}])
+        self.assertEqual(daemon.state.session_state, SessionState.WAITING_FOR_VM)
+
+        with patch("sys.argv", ["relayinner-displayd", "--unknown-option"]):
+            with self.assertRaises(SystemExit) as raised:
+                __import__("runpy").run_module("relayinner_display.daemon", run_name="__main__")
+        self.assertEqual(raised.exception.code, 2)
+
     def test_running_vm_connects_and_reconnects_after_viewer_exit(self) -> None:
         with TemporaryDirectory() as temp_dir:
             config = build_config(Path(temp_dir))
