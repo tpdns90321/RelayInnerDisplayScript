@@ -24,6 +24,7 @@ from relayinner_display.config import (
 from relayinner_display.session import (
     SessionSocketClient,
     SessionSupervisor,
+    main,
     parse_wlr_randr_outputs,
 )
 
@@ -1219,6 +1220,15 @@ class SessionSupervisorTests(unittest.TestCase):
         self.assertEqual(commands, [["relay-wlopm", "--off", "HDMI-A-1"]])
         self.assertEqual(supervisor.view_state.display_power_state, "on")
         self.assertEqual(supervisor.view_state.status_text, "Waiting for VM")
+
+
+class SessionCliTests(unittest.TestCase):
+    def test_main_forwards_explicit_config_path_to_session_runner(self) -> None:
+        with patch("relayinner_display.session.run", return_value=7) as run_mock:
+            result = main(["--config", "/tmp/relayinner-session.toml"])
+
+        self.assertEqual(result, 7)
+        run_mock.assert_called_once_with(Path("/tmp/relayinner-session.toml"))
 
 
 def build_config(
