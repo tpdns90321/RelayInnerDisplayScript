@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 from relayinner_display.config import (
     AppConfig,
+    ConfigError,
     ConsoleConfig,
     ConsoleLookingGlassConfig,
     ConsoleMoonlightConfig,
@@ -1304,6 +1305,35 @@ class SessionRuntimeTests(unittest.TestCase):
 
         self.assertEqual(observed_paths, ["/run/relayinner-display/session.sock"])
         self.assertEqual(sleep_delays, [2.0])
+
+    def test_run_logs_invalid_config_and_retries_with_fallback_socket(self) -> None:
+        class StopLoop(Exception):
+            pass
+
+        observed_paths: list[str] = []
+
+        class FailingSocket:
+            def connect(self, path: str) -> None:
+                observed_paths.append(path)
+                raise OSError("daemon unavailable")
+
+            def setblocking(self, blocking: bool) -> None:
+                raise AssertionError("failed connects are not made nonblocking")
+
+        def stop_after_retry(delay: float) -> None:
+            raise StopLoop
+
+        with (
+            patch("relayinner_display.session.load_config", side_effect=ConfigError("broken config")),
+            patch("relayinner_display.session.socket.socket", return_value=FailingSocket()),
+            patch("relayinner_display.session.time.sleep", side_effect=stop_after_retry),
+            self.assertLogs("relayinner-display.session", level="ERROR") as logs,
+            self.assertRaises(StopLoop),
+        ):
+            run(Path("/tmp/broken-relayinner-session.toml"))
+
+        self.assertEqual(observed_paths, ["/run/relayinner-display/session.sock"])
+        self.assertEqual(logs.output, ["ERROR:relayinner-display.session:Invalid config: broken config"])
 
 
 class SessionCliTests(unittest.TestCase):
