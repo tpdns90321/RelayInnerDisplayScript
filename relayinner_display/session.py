@@ -337,20 +337,27 @@ class SessionSupervisor:
             return
 
         self._suppress_exit_report = not report_exit
-        self.console_process.terminate()
+        process = self.console_process
+        process.terminate()
         try:
-            self.console_process.wait(timeout=2)
-        except subprocess.TimeoutExpired:
-            self.console_process.kill()
-            try:
-                self.console_process.wait(timeout=2)
-            except subprocess.TimeoutExpired:
-                self.console_logger.warning("Console process did not exit after SIGKILL")
+            self._wait_for_console_process_exit(process)
         finally:
             self.console_process = None
             self.active_console_backend = None
             self._send_legacy_console_events = False
             self._refresh_view_state()
+
+    def _wait_for_console_process_exit(self, process: subprocess.Popen[str]) -> None:
+        try:
+            process.wait(timeout=2)
+            return
+        except subprocess.TimeoutExpired:
+            process.kill()
+
+        try:
+            process.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            self.console_logger.warning("Console process did not exit after SIGKILL")
 
     def _validate_console_request(
         self,
