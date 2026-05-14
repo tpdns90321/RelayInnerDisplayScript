@@ -245,6 +245,15 @@ class SessionSupervisorTests(unittest.TestCase):
 
         self.assertEqual(supervisor.session_ready_message(), {"type": "session_ready"})
 
+    def test_unhandled_daemon_message_type_raises_assertion(self) -> None:
+        supervisor = SessionSupervisor(config=build_config())
+
+        with (
+            patch("relayinner_display.session.validate_daemon_message", return_value={"type": "mystery"}),
+            self.assertRaisesRegex(AssertionError, "Unhandled daemon message type: mystery"),
+        ):
+            supervisor.handle_daemon_message({"type": "health_ping"})
+
     def test_connect_console_launches_remote_viewer_for_spice(self) -> None:
         launches: list[tuple[list[str], str | None, dict[str, str]]] = []
 
