@@ -405,6 +405,41 @@ class SessionSupervisorTests(unittest.TestCase):
 
         self.assertEqual(events, [{"type": "console_started", "pid": 9001}])
 
+    def test_connect_console_reports_viewer_launch_failure(self) -> None:
+        def failing_factory(
+            command: list[str],
+            cwd: str | None = None,
+            env: dict[str, str] | None = None,
+            text: bool = True,
+        ) -> FakeProcess:
+            raise FileNotFoundError("remote-viewer")
+
+        supervisor = SessionSupervisor(config=build_config(), process_factory=failing_factory)
+        events = supervisor.handle_daemon_message(
+            {
+                "type": "connect_console",
+                "backend": "spice",
+                "launcher": "remote-viewer",
+                "argv": [
+                    "remote-viewer",
+                    "--full-screen",
+                    "/run/relayinner-display/console/spice-current.vv",
+                ],
+            }
+        )
+
+        self.assertEqual(
+            events,
+            [
+                {
+                    "type": "session_error",
+                    "reason": "viewer_launch_failed: backend=spice: remote-viewer",
+                }
+            ],
+        )
+        self.assertFalse(supervisor.view_state.console_active)
+        self.assertEqual(supervisor.view_state.status_text, "Degraded")
+
     def test_connect_console_rejects_non_allowlisted_launcher(self) -> None:
         launches: list[list[str]] = []
 
