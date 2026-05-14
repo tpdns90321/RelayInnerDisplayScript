@@ -1421,6 +1421,58 @@ class SessionRuntimeTests(unittest.TestCase):
         self.assertTrue(connected_socket.closed)
         self.assertEqual(sleep_delays, [2.0])
 
+    def test_run_reconnects_after_session_ready_send_retry_delay(self) -> None:
+        class StopLoop(Exception):
+            pass
+
+        observed_paths: list[str] = []
+        sleep_delays: list[float] = []
+
+        class ReadySendFailingSocket(FakeSocket):
+            def __init__(self) -> None:
+                super().__init__([])
+                self.blocking: bool | None = None
+
+            def connect(self, path: str) -> None:
+                observed_paths.append(path)
+
+            def setblocking(self, blocking: bool) -> None:
+                self.blocking = blocking
+
+            def sendall(self, payload: bytes) -> None:
+                self.sent.append(payload)
+                raise BrokenPipeError("daemon closed")
+
+        class StopOnConnectSocket:
+            def connect(self, path: str) -> None:
+                observed_paths.append(path)
+                raise StopLoop
+
+            def setblocking(self, blocking: bool) -> None:
+                raise AssertionError("stopped before nonblocking setup")
+
+        first_socket = ReadySendFailingSocket()
+
+        def fake_sleep(delay: float) -> None:
+            sleep_delays.append(delay)
+
+        with (
+            patch("relayinner_display.session.load_config", return_value=build_config()),
+            patch("relayinner_display.session.socket.socket", side_effect=[first_socket, StopOnConnectSocket()]),
+            patch("relayinner_display.session.time.sleep", side_effect=fake_sleep),
+            self.assertRaises(StopLoop),
+        ):
+            run(Path("/tmp/relayinner-session.toml"))
+
+        self.assertEqual(
+            observed_paths,
+            ["/run/relayinner-display/session.sock", "/run/relayinner-display/session.sock"],
+        )
+        self.assertFalse(first_socket.blocking)
+        self.assertEqual(first_socket.sent, [b'{"type":"session_ready"}\n'])
+        self.assertTrue(first_socket.closed)
+        self.assertEqual(sleep_delays, [2.0])
+
     def test_run_keeps_connection_open_after_health_ping(self) -> None:
         class StopLoop(Exception):
             pass
