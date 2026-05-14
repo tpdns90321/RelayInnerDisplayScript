@@ -19,7 +19,7 @@ from relayinner_display.config import (
     TargetConfig,
     resolve_kiosk_compositor,
 )
-from relayinner_display.session import SessionSupervisor
+from relayinner_display.session import SessionSocketClient, SessionSupervisor
 
 
 class FakeProcess:
@@ -45,6 +45,54 @@ class FakeProcess:
     def kill(self) -> None:
         self.killed = True
         self.returncode = -9
+
+
+class FakeSocket:
+    def __init__(self, chunks: list[bytes | BaseException]) -> None:
+        self.chunks = list(chunks)
+        self.closed = False
+
+    def recv(self, size: int) -> bytes:
+        if not self.chunks:
+            raise BlockingIOError
+        chunk = self.chunks.pop(0)
+        if isinstance(chunk, BaseException):
+            raise chunk
+        return chunk
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class SessionSocketClientTests(unittest.TestCase):
+    def test_read_messages_buffers_partial_frames_until_newline_and_detects_disconnect(self) -> None:
+        client = SessionSocketClient(Path("/run/relayinner-display/session.sock"))
+        first_socket = FakeSocket([b'{"type":"health_ping"'])
+        client.connection = first_socket  # exercise read buffering without opening a real socket
+
+        messages, disconnected = client.read_messages()
+
+        self.assertEqual(messages, [])
+        self.assertFalse(disconnected)
+        self.assertEqual(client.buffer, b'{"type":"health_ping"')
+        self.assertFalse(first_socket.closed)
+
+        second_socket = FakeSocket([b'}\n{"type":"disconnect_console","reason":"vm_stopped"}\n', b""])
+        client.connection = second_socket
+
+        messages, disconnected = client.read_messages()
+
+        self.assertEqual(
+            messages,
+            [
+                {"type": "health_ping"},
+                {"type": "disconnect_console", "reason": "vm_stopped"},
+            ],
+        )
+        self.assertTrue(disconnected)
+        self.assertTrue(second_socket.closed)
+        self.assertIsNone(client.connection)
+        self.assertEqual(client.buffer, b"")
 
 
 class SessionSupervisorTests(unittest.TestCase):
