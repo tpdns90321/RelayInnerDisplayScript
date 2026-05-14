@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import builtins
 from pathlib import Path
+import sys
 from tempfile import TemporaryDirectory
+import types
 import unittest
 from unittest.mock import patch
 
@@ -30,6 +32,46 @@ class EvdevPowerButtonSourceTests(unittest.TestCase):
             self.assertRaisesRegex(PowerButtonError, "python-evdev is required"),
         ):
             source.open()
+
+    def test_open_poll_and_close_counts_power_key_presses(self) -> None:
+        events = [
+            types.SimpleNamespace(type=1, code=116, value=0),
+            types.SimpleNamespace(type=1, code=116, value=1),
+            types.SimpleNamespace(type=1, code=30, value=1),
+            types.SimpleNamespace(type=2, code=116, value=1),
+            types.SimpleNamespace(type=1, code=116, value=1),
+        ]
+        opened_paths: list[str] = []
+
+        class FakeInputDevice:
+            def __init__(self, path: str) -> None:
+                opened_paths.append(path)
+                self.closed = False
+
+            def read_one(self) -> object | None:
+                if events:
+                    return events.pop(0)
+                return None
+
+            def close(self) -> None:
+                self.closed = True
+
+        fake_evdev = types.SimpleNamespace(
+            InputDevice=FakeInputDevice,
+            ecodes=types.SimpleNamespace(EV_KEY=1, KEY_POWER=116),
+        )
+        source = EvdevPowerButtonSource("/dev/input/event0")
+
+        with patch.dict(sys.modules, {"evdev": fake_evdev}):
+            source.open()
+            device = source._device
+            presses = source.poll_presses()
+            source.close()
+
+        self.assertEqual(opened_paths, ["/dev/input/event0"])
+        self.assertEqual(presses, 2)
+        self.assertTrue(device.closed)
+        self.assertEqual(source.poll_presses(), 0)
 
 
 class LogindPowerButtonPolicyCheckerTests(unittest.TestCase):
