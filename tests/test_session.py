@@ -1048,6 +1048,49 @@ class SessionSupervisorTests(unittest.TestCase):
         self.assertEqual(commands[2][0], ["wlr-randr", "--output", "DP-1", "--off"])
         self.assertEqual(supervisor.view_state.status_text, "Display sleeping")
 
+    def test_display_power_with_wlr_randr_stops_when_output_command_fails(self) -> None:
+        commands: list[list[str]] = []
+
+        def fake_power_runner(
+            command: list[str],
+            env: dict[str, str],
+            text: bool,
+            capture_output: bool,
+            check: bool,
+        ) -> subprocess.CompletedProcess[str]:
+            commands.append(command)
+            if command == ["wlr-randr"]:
+                return subprocess.CompletedProcess(
+                    command,
+                    0,
+                    'HDMI-A-1 "Built-in display"\nDP-1 "External"\n',
+                    "",
+                )
+            if command == ["wlr-randr", "--output", "DP-1", "--off"]:
+                return subprocess.CompletedProcess(command, 2, "", "link lost")
+            return subprocess.CompletedProcess(command, 0, "", "")
+
+        supervisor = SessionSupervisor(
+            config=build_config(power_helper="wlr-randr"),
+            power_command_runner=fake_power_runner,
+        )
+
+        events = supervisor.handle_daemon_message(
+            {"type": "display_power", "state": "off", "output": ""}
+        )
+
+        self.assertEqual(events, [])
+        self.assertEqual(
+            commands,
+            [
+                ["wlr-randr"],
+                ["wlr-randr", "--output", "HDMI-A-1", "--off"],
+                ["wlr-randr", "--output", "DP-1", "--off"],
+            ],
+        )
+        self.assertEqual(supervisor.view_state.display_power_state, "on")
+        self.assertEqual(supervisor.view_state.status_text, "Waiting for VM")
+
     def test_display_power_with_wlr_randr_no_outputs_is_nonfatal(self) -> None:
         commands: list[list[str]] = []
 
