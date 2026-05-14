@@ -231,6 +231,11 @@ class SessionSocketClientTests(unittest.TestCase):
 
 
 class SessionSupervisorTests(unittest.TestCase):
+    def test_session_ready_message_announces_session_without_extra_payload(self) -> None:
+        supervisor = SessionSupervisor(config=build_config())
+
+        self.assertEqual(supervisor.session_ready_message(), {"type": "session_ready"})
+
     def test_connect_console_launches_remote_viewer_for_spice(self) -> None:
         launches: list[tuple[list[str], str | None, dict[str, str]]] = []
 
