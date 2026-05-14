@@ -405,15 +405,7 @@ class SessionSupervisor:
         if completed is None:
             return []
 
-        self.view_state.display_power_state = state
-        self._refresh_view_state()
-        self.display_logger.info(
-            "Display power applied: state=%s output=%s helper=%s",
-            state,
-            target_output,
-            self.power_helper,
-        )
-        return [{"type": "display_power_applied", "state": state}]
+        return self._record_display_power_applied(state=state, output=target_output)
 
     def _apply_wlr_randr_display_power(self, state: str, output: str) -> list[dict[str, object]]:
         target_outputs = self._resolve_wlr_randr_outputs(output)
@@ -429,13 +421,18 @@ class SessionSupervisor:
             if completed is None:
                 return []
 
+        return self._record_display_power_applied(
+            state=state,
+            output=",".join(target_outputs),
+        )
+
+    def _record_display_power_applied(self, *, state: str, output: str) -> list[dict[str, object]]:
         self.view_state.display_power_state = state
         self._refresh_view_state()
-        applied_outputs = ",".join(target_outputs)
         self.display_logger.info(
             "Display power applied: state=%s output=%s helper=%s",
             state,
-            applied_outputs,
+            output,
             self.power_helper,
         )
         return [{"type": "display_power_applied", "state": state}]

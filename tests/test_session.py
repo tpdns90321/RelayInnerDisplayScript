@@ -867,6 +867,33 @@ class SessionSupervisorTests(unittest.TestCase):
         self.assertEqual(events, [])
         self.assertEqual(supervisor.view_state.display_power_state, "on")
 
+    def test_display_power_helper_command_failure_is_nonfatal(self) -> None:
+        commands: list[list[str]] = []
+
+        def fake_power_runner(
+            command: list[str],
+            env: dict[str, str],
+            text: bool,
+            capture_output: bool,
+            check: bool,
+        ) -> subprocess.CompletedProcess[str]:
+            commands.append(command)
+            return subprocess.CompletedProcess(command, 2, "", "output missing")
+
+        supervisor = SessionSupervisor(
+            config=build_config(power_helper="relay-wlopm"),
+            power_command_runner=fake_power_runner,
+        )
+
+        events = supervisor.handle_daemon_message(
+            {"type": "display_power", "state": "off", "output": "HDMI-A-1"}
+        )
+
+        self.assertEqual(events, [])
+        self.assertEqual(commands, [["relay-wlopm", "--off", "HDMI-A-1"]])
+        self.assertEqual(supervisor.view_state.display_power_state, "on")
+        self.assertEqual(supervisor.view_state.status_text, "Waiting for VM")
+
 
 def build_config(
     *,
