@@ -26,6 +26,7 @@ from relayinner_display.session import (
     SessionSupervisor,
     main,
     parse_wlr_randr_outputs,
+    run,
 )
 
 
@@ -1270,6 +1271,39 @@ class SessionSupervisorTests(unittest.TestCase):
         self.assertEqual(commands, [["relay-wlopm", "--off", "HDMI-A-1"]])
         self.assertEqual(supervisor.view_state.display_power_state, "on")
         self.assertEqual(supervisor.view_state.status_text, "Waiting for VM")
+
+
+class SessionRuntimeTests(unittest.TestCase):
+    def test_run_retries_after_control_socket_connection_failure(self) -> None:
+        class StopLoop(Exception):
+            pass
+
+        observed_paths: list[str] = []
+
+        class FailingSocket:
+            def connect(self, path: str) -> None:
+                observed_paths.append(path)
+                raise OSError("daemon unavailable")
+
+            def setblocking(self, blocking: bool) -> None:
+                raise AssertionError("failed connects are not made nonblocking")
+
+        sleep_delays: list[float] = []
+
+        def fake_sleep(delay: float) -> None:
+            sleep_delays.append(delay)
+            raise StopLoop
+
+        with (
+            patch("relayinner_display.session.load_config", return_value=build_config()),
+            patch("relayinner_display.session.socket.socket", return_value=FailingSocket()),
+            patch("relayinner_display.session.time.sleep", side_effect=fake_sleep),
+            self.assertRaises(StopLoop),
+        ):
+            run(Path("/tmp/relayinner-session.toml"))
+
+        self.assertEqual(observed_paths, ["/run/relayinner-display/session.sock"])
+        self.assertEqual(sleep_delays, [2.0])
 
 
 class SessionCliTests(unittest.TestCase):
