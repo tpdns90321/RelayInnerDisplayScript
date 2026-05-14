@@ -48,8 +48,15 @@ class FakeProcess:
 
 
 class FakeSocket:
-    def __init__(self, chunks: list[bytes | BaseException]) -> None:
+    def __init__(
+        self,
+        chunks: list[bytes | BaseException],
+        *,
+        send_error: BaseException | None = None,
+    ) -> None:
         self.chunks = list(chunks)
+        self.send_error = send_error
+        self.sent: list[bytes] = []
         self.closed = False
 
     def recv(self, size: int) -> bytes:
@@ -60,11 +67,35 @@ class FakeSocket:
             raise chunk
         return chunk
 
+    def sendall(self, payload: bytes) -> None:
+        if self.send_error is not None:
+            raise self.send_error
+        self.sent.append(payload)
+
     def close(self) -> None:
         self.closed = True
 
 
 class SessionSocketClientTests(unittest.TestCase):
+    def test_send_message_serializes_payload_and_clears_connection_after_write_error(self) -> None:
+        client = SessionSocketClient(Path("/run/relayinner-display/session.sock"))
+        self.assertFalse(client.send_message({"type": "session_ready"}))
+
+        sending_socket = FakeSocket([])
+        client.connection = sending_socket
+
+        self.assertTrue(client.send_message({"type": "session_ready"}))
+        self.assertEqual(sending_socket.sent, [b'{"type":"session_ready"}\n'])
+
+        failing_socket = FakeSocket([], send_error=BrokenPipeError("closed"))
+        client.connection = failing_socket
+        client.buffer = b"partial"
+
+        self.assertFalse(client.send_message({"type": "session_ready"}))
+        self.assertTrue(failing_socket.closed)
+        self.assertIsNone(client.connection)
+        self.assertEqual(client.buffer, b"")
+
     def test_read_messages_buffers_partial_frames_until_newline_and_detects_disconnect(self) -> None:
         client = SessionSocketClient(Path("/run/relayinner-display/session.sock"))
         first_socket = FakeSocket([b'{"type":"health_ping"'])
